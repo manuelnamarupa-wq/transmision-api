@@ -11,9 +11,9 @@ export default async function handler(request, response) {
         return response.status(500).json({ reply: 'La clave de API no está configurada en el servidor.' });
     }
     
-    // --- ESTA ES LA ÚNICA LÍNEA QUE HA CAMBIADO ---
-    const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.0-pro:generateContent?key=${API_KEY}`;
-    // ---------------------------------------------
+    // --- ¡LA CORRECCIÓN ESTÁ AQUÍ! ---
+    const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent?key=${API_KEY}`;
+    // ----------------------------------
 
     const prompt = `Basado en los datos de la plantilla que tienes, responde qué transmisión puede traer el siguiente vehículo: "${userQuery}". Tu respuesta debe ser resumida, mostrando solo un renglón por cada opción encontrada en la plantilla. Si no encuentras el vehículo, indícalo.`;
 
@@ -36,6 +36,7 @@ export default async function handler(request, response) {
         response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
         response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
         
+        // --- VOY A VOLVER A PONER EL MENSAJE DE ÉXITO ---
         response.status(200).json({ reply: textResponse });
 
     } catch (error) {
