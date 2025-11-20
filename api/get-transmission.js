@@ -1,5 +1,4 @@
 export default async function handler(request, response) {
-    // ... (toda la parte de arriba es igual)
     if (request.method !== 'POST') {
         return response.status(405).json({ message: 'Method Not Allowed' });
     }
@@ -11,7 +10,11 @@ export default async function handler(request, response) {
     if (!API_KEY) {
         return response.status(500).json({ reply: 'La clave de API no está configurada en el servidor.' });
     }
-    const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${API_KEY}`;
+    
+    // --- ESTA ES LA ÚNICA LÍNEA QUE HA CAMBIADO ---
+    const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.0-pro:generateContent?key=${API_KEY}`;
+    // ---------------------------------------------
+
     const prompt = `Basado en los datos de la plantilla que tienes, responde qué transmisión puede traer el siguiente vehículo: "${userQuery}". Tu respuesta debe ser resumida, mostrando solo un renglón por cada opción encontrada en la plantilla. Si no encuentras el vehículo, indícalo.`;
 
     try {
@@ -22,7 +25,6 @@ export default async function handler(request, response) {
         });
 
         if (!geminiResponse.ok) {
-            // Si la respuesta de Google no es exitosa, capturamos el texto del error
             const errorText = await geminiResponse.text();
             throw new Error(`Error en la API de Gemini: ${geminiResponse.status} - ${errorText}`);
         }
@@ -38,8 +40,6 @@ export default async function handler(request, response) {
 
     } catch (error) {
         console.error("Error detallado:", error);
-        // !!! --- ESTA ES LA LÍNEA QUE CAMBIAMOS --- !!!
-        // Ahora devolveremos el mensaje de error real en lugar del genérico.
         response.status(500).json({ error_real: error.message });
     }
 }
