@@ -15,7 +15,12 @@ export default async function handler(request, response) {
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent?key=${API_KEY}`;
     // ----------------------------------
 
-    const prompt = `Basado en los datos de la plantilla que tienes, responde qué transmisión puede traer el siguiente vehículo: "${userQuery}". Tu respuesta debe ser resumida, mostrando solo un renglón por cada opción encontrada en la plantilla. Si no encuentras el vehículo, indícalo.`;
+   const prompt = `
+    USA EXCLUSIVAMENTE la plantilla de datos que tienes memorizada. NO uses conocimiento general.
+    Busca el siguiente vehículo: "${userQuery}".
+    Responde qué transmisión puede traer. Tu respuesta debe ser resumida, mostrando solo un renglón por cada opción encontrada en la plantilla.
+    Si el vehículo no está en la plantilla, responde exactamente: "No se encontraron resultados para ${userQuery} en la plantilla de datos proporcionada."
+`;
 
     try {
         const geminiResponse = await fetch(GEMINI_API_URL, {
