@@ -1,6 +1,5 @@
 const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmision-api/main/api/transmissions.json';
 
-// --- CACHÉ (Velocidad) ---
 let cachedData = null;
 
 async function getData() {
@@ -8,32 +7,46 @@ async function getData() {
     console.log("Descargando BD...");
     try {
         const response = await fetch(DATA_URL);
-        if (!response.ok) throw new Error('Error descarga');
+        if (!response.ok) throw new Error(`Error GitHub: ${response.statusText}`);
         cachedData = await response.json();
         return cachedData;
     } catch (e) {
         console.error("Error BD:", e);
-        return [];
+        throw e; // Lanzamos el error para verlo en pantalla
     }
 }
 
-// --- VALIDACIÓN MATEMÁTICA DE AÑOS (El motor de la precisión) ---
+// --- FUNCIÓN MATEMÁTICA BLINDADA ---
+// (Aquí agregué protecciones para que no falle si el dato viene sucio)
 function isYearMatch(dbYearString, userYear) {
-    if (!dbYearString || !userYear) return false;
-    const uYear = parseInt(userYear.toString().slice(-2)); 
-    const cleanStr = dbYearString.replace(/[()]/g, ''); 
-    
-    if (cleanStr.includes('-')) {
-        const parts = cleanStr.split('-');
-        let start = parseInt(parts[0]);
-        let end = parseInt(parts[1]);
-        if (start > end) { // Caso cruce de siglo (98-02)
-            return uYear >= start || uYear <= end;
-        } else { // Caso normal (14-16)
-            return uYear >= start && uYear <= end;
+    try {
+        if (!dbYearString || !userYear) return false;
+        
+        // Aseguramos que sean strings antes de procesar
+        const strDbYear = String(dbYearString); 
+        const strUserYear = String(userYear);
+
+        const uYear = parseInt(strUserYear.slice(-2)); 
+        const cleanStr = strDbYear.replace(/[()]/g, ''); 
+        
+        if (cleanStr.includes('-')) {
+            const parts = cleanStr.split('-');
+            let start = parseInt(parts[0]);
+            let end = parseInt(parts[1]);
+            
+            // Si no son números válidos, ignoramos este registro
+            if (isNaN(start) || isNaN(end)) return false;
+
+            if (start > end) { // Caso 98-02
+                return uYear >= start || uYear <= end;
+            } else { // Caso 14-16
+                return uYear >= start && uYear <= end;
+            }
         }
+        return cleanStr.includes(uYear.toString());
+    } catch (err) {
+        return false; // Si falla la matemática, simplemente decimos que no coincide
     }
-    return cleanStr.includes(uYear.toString());
 }
 
 export default async function handler(request, response) {
@@ -45,10 +58,16 @@ export default async function handler(request, response) {
     if (request.method === 'OPTIONS') return response.status(200).end();
 
     try {
+        // 1. VERIFICACIÓN API KEY
+        if (!process.env.GEMINI_API_KEY) {
+            throw new Error("Falta la API KEY en Vercel.");
+        }
+
+        // 2. CARGA DE DATOS
         const transmissionData = await getData();
         if (!transmissionData || transmissionData.length === 0) {
             cachedData = null; 
-            return response.status(500).json({ reply: "Error: Base de datos no disponible." });
+            throw new Error("Base de datos vacía o no accesible.");
         }
 
         const userQuery = request.body.query;
@@ -61,56 +80,56 @@ export default async function handler(request, response) {
 
         // --- FILTRO ESTRICTO ---
         const candidates = transmissionData.filter(item => {
-            const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
+            // Protección contra datos nulos en el JSON
+            const mk = item.Make || "";
+            const md = item.Model || "";
+            const yr = item.Years || "";
+            const tt = item['Trans Type'] || "";
+            const et = item['Engine Type / Size'] || "";
+
+            const itemText = `${mk} ${md} ${yr} ${tt} ${et}`.toLowerCase();
             
             if (itemText.includes('standard') || itemText.includes('manual')) return false;
 
-            // 1. Coincidencia de Texto (Marca/Modelo)
             const textMatch = textParts.every(part => itemText.includes(part));
             if (!textMatch) return false;
 
-            // 2. Coincidencia de Año (Matemática)
             if (userYear) {
-                return isYearMatch(item.Years, userYear);
+                return isYearMatch(yr, userYear);
             }
             return true;
         }).slice(0, 10); 
 
         if (candidates.length === 0) {
             return response.status(200).json({ 
-                reply: "No encontrado para ese año y modelo específico." 
+                reply: "No encontrado para ese año y modelo específico (Filtro matemático)." 
             });
         }
 
-        // --- PREPARACIÓN PARA IA ---
+        // --- IA ---
         const API_KEY = process.env.GEMINI_API_KEY;
-        const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent?key=${API_KEY}`;
+        // Usamos gemini-pro estándar para descartar problemas de versión
+        const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${API_KEY}`;
         
         const simplifiedContext = candidates.map(c => 
-            `Auto: ${c.Make} ${c.Model} | Años: ${c.Years} | Trans: ${c['Trans Model']} | Info: ${c['Engine Type / Size']} ${c['Trans Type']}`
+            `Auto: ${c.Make} ${c.Model} | Años: ${c.Years} | Trans: ${c['Trans Model']} | Info: ${c['Engine Type / Size']}`
         ).join('\n');
 
         const prompt = `
             Actúa como experto en inventario.
-            DATOS ENCONTRADOS:
+            DATOS:
             ${simplifiedContext}
             
             BÚSQUEDA: "${userQuery}"
 
-            TAREA:
-            Genera una lista HTML pura.
-
-            REGLAS ESTRICTAS:
-            1. PROHIBIDO SALUDAR. No digas "Claro", "Hola" o "Aquí tienes".
-            2. Empieza directamente con el primer item de la lista.
-            3. Pon el nombre de la transmisión en negritas <b></b>.
-            4. OBLIGATORIO: Muestra el rango de años del dato original.
+            TAREA: Genera lista HTML.
+            REGLAS:
+            1. NO SALUDAR.
+            2. Transmisión en <b></b>.
+            3. Muestra el rango de años original.
             
-            FORMATO REQUERIDO:
-            - <b>[CODIGO_TRANS]</b> (Años: [Rango] | [Motor] - [Tracción])
-
-            Ejemplo:
-            - <b>09G</b> (Años: 14-16 | 2.5L - 6 SP FWD)
+            FORMATO:
+            - <b>[CODIGO]</b> (Años: [Rango] | [Info])
         `;
 
         const geminiResponse = await fetch(GEMINI_API_URL, {
@@ -118,19 +137,19 @@ export default async function handler(request, response) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
                 contents: [{ parts: [{ text: prompt }] }],
-                // Configuración "Temperatura 0" para máxima obediencia y seriedad
-                generationConfig: {
-                    temperature: 0.0, 
-                    maxOutputTokens: 250
-                }
+                generationConfig: { temperature: 0.0 }
             })
         });
+
+        if (!geminiResponse.ok) {
+            const errData = await geminiResponse.text();
+            throw new Error(`Error Google: ${errData}`);
+        }
 
         const data = await geminiResponse.json();
         
         if (!data.candidates || data.candidates.length === 0) {
-             // Fallback por si la IA falla (Modo Manual)
-             let fallback = candidates.map(c => `- <b>${c['Trans Model']}</b> (Años: ${c.Years} | ${c['Engine Type / Size']})`).join('<br>');
+             let fallback = candidates.map(c => `- <b>${c['Trans Model']}</b> (Años: ${c.Years})`).join('<br>');
              return response.status(200).json({ reply: fallback });
         }
 
@@ -138,7 +157,10 @@ export default async function handler(request, response) {
         return response.status(200).json({ reply: textResponse });
 
     } catch (error) {
-        console.error("Error:", error);
-        return response.status(500).json({ reply: "Sistema reiniciando. Intenta en 5 segundos." });
+        console.error("Error Real:", error);
+        // AQUÍ ESTÁ EL CAMBIO: Ahora te muestro el error real en pantalla
+        return response.status(500).json({ 
+            reply: `ERROR TÉCNICO (Mándame captura de esto): ${error.message}` 
+        });
     }
 }
