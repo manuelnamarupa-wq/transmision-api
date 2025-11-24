@@ -1,8 +1,8 @@
-// --- CÓDIGO BLINDADO (CACHÉ + SEGURIDAD IA) ---
+// --- CÓDIGO FINAL CORREGIDO (MODELO LATEST) ---
 
 const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmision-api/main/api/transmissions.json';
 
-// Variable global para mantener los datos en memoria RAM (Velocidad)
+// Variable de Caché para velocidad
 let cachedData = null;
 
 async function getData() {
@@ -29,19 +29,18 @@ export default async function handler(request, response) {
     if (request.method === 'OPTIONS') return response.status(200).end();
 
     try {
-        // 1. CARGA DE DATOS
+        // 1. OBTENCIÓN DE DATOS
         const transmissionData = await getData();
 
         if (!transmissionData || transmissionData.length === 0) {
-            // Intento desesperado de recarga si la caché falló
-            cachedData = null; 
+            cachedData = null; // Reset de caché por si acaso
             return response.status(500).json({ reply: "Error: Base de datos no disponible. Reintenta." });
         }
 
         const userQuery = request.body.query;
         if (!userQuery) return response.status(400).json({ reply: "Escribe un vehículo." });
 
-        // 2. FILTRO (Limitado a 10 para velocidad)
+        // 2. FILTRADO RÁPIDO
         const lowerCaseQuery = userQuery.toLowerCase().trim();
         const queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 1);
 
@@ -61,10 +60,11 @@ export default async function handler(request, response) {
             `${c.Make} ${c.Model} (${c.Years}) | ${c['Trans Model']} | ${c['Engine Type / Size']}`
         ).join('\n');
 
-        // 4. IA CON CONFIGURACIÓN DE SEGURIDAD
+        // 4. IA CON EL MODELO QUE TE FUNCIONA (gemini-pro-latest)
         const API_KEY = process.env.GEMINI_API_KEY;
-        // Usamos 'gemini-pro' estándar para máxima estabilidad
-        const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${API_KEY}`;
+        
+        // --- CAMBIO AQUÍ: Volvemos a 'gemini-pro-latest' ---
+        const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent?key=${API_KEY}`;
 
         const prompt = `
             Experto en transmisiones.
@@ -73,7 +73,7 @@ export default async function handler(request, response) {
             BUSCAN: "${userQuery}"
 
             REGLAS:
-            1. Solo automáticos (Ignora "Standard").
+            1. Ignora "Standard/Manual". Solo automáticos.
             2. Filtra estrictamente por Año y Modelo.
             
             FORMATO:
@@ -89,7 +89,7 @@ export default async function handler(request, response) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
                 contents: [{ parts: [{ text: prompt }] }],
-                // Configuración para que responda rápido y NO BLOQUEE NADA
+                // Filtros de seguridad en "BLOCK_ONLY_HIGH" para que no se asuste con autopartes
                 safetySettings: [
                     { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_ONLY_HIGH" },
                     { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
@@ -105,18 +105,15 @@ export default async function handler(request, response) {
 
         if (!geminiResponse.ok) {
             const errText = await geminiResponse.text();
-            throw new Error(`Google Error: ${errText}`);
+            throw new Error(`Google Error (${geminiResponse.status}): ${errText}`);
         }
 
         const data = await geminiResponse.json();
 
-        // --- AQUÍ OCURRÍA EL ERROR ANTERIOR ---
-        // Verificamos si realmente hay candidatos antes de leer la posición [0]
+        // Validación de respuesta vacía
         if (!data.candidates || data.candidates.length === 0) {
-            console.error("Respuesta vacía de IA:", JSON.stringify(data));
-            // Si la IA no quiso responder, damos una respuesta genérica basada en los datos crudos
             return response.status(200).json({ 
-                reply: `Encontré posibles coincidencias como: <b>${candidates[0]['Trans Model']}</b> para ${candidates[0].Model}. Por favor especifica más el año o motor.` 
+                reply: `Posible coincidencia: <b>${candidates[0]['Trans Model']}</b> para ${candidates[0].Model}. (IA sin respuesta detallada).` 
             });
         }
 
