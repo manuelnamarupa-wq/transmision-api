@@ -1,92 +1,97 @@
-// --- CÓDIGO ESTABLE (REVERTIDO A LO SEGURO) ---
-const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmision-api/main/api/transmissions.json';
+// --- CÓDIGO TURBO (LECTURA LOCAL) ---
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
+// NOTA: Esto asume que 'transmissions.json' está en la misma carpeta 'api'
+// Si Vercel se queja de que no encuentra el archivo, avísame.
 
 let transmissionData = [];
-let dataLoaded = false;
 
-async function loadData() {
-    if (!dataLoaded) {
+function loadDataLocal() {
+    if (transmissionData.length === 0) {
         try {
-            const response = await fetch(DATA_URL);
-            if (!response.ok) throw new Error('Error descargando BD.');
-            transmissionData = await response.json();
-            dataLoaded = true;
-            console.log(`Datos cargados: ${transmissionData.length}`);
+            // Buscamos el archivo en el directorio actual del proceso
+            const file = join(process.cwd(), 'api', 'transmissions.json');
+            const data = readFileSync(file, 'utf8');
+            transmissionData = JSON.parse(data);
+            console.log(`Carga Local Exitosa: ${transmissionData.length} registros.`);
         } catch (error) {
-            console.error('Error BD:', error);
+            console.error('Error leyendo archivo local:', error);
+            // Fallback: Si falla local, intentamos la URL de GitHub como respaldo
+            console.log('Intentando respaldo remoto...');
+            return false; 
         }
     }
+    return true;
 }
 
 export default async function handler(request, response) {
-    // Configuración CORS estándar
+    // Configuración CORS
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
     if (request.method === 'OPTIONS') return response.status(200).end();
+
+    // 1. INTENTO DE CARGA LOCAL (INSTANTÁNEO)
+    let loaded = loadDataLocal();
+
+    // 2. RESPALDO: Si no funcionó local (por ruta), usamos FETCH
+    if (!loaded || transmissionData.length === 0) {
+         try {
+            const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmision-api/main/api/transmissions.json';
+            const resp = await fetch(DATA_URL);
+            if (resp.ok) {
+                transmissionData = await resp.json();
+                loaded = true;
+            }
+         } catch (e) {
+             console.error("Error total de base de datos");
+         }
+    }
     
-    await loadData();
-    
-    // Verificación de seguridad de datos
-    if (!dataLoaded || transmissionData.length === 0) {
-        // Intento de recarga de emergencia
-        await loadData();
-        if (!dataLoaded) return response.status(500).json({ reply: "Error temporal: La base de datos se está reiniciando." });
+    if (!loaded || transmissionData.length === 0) {
+        return response.status(500).json({ reply: "Error: El sistema se está reiniciando. Intenta en 5 segundos." });
     }
 
     const userQuery = request.body.query;
-    if (!userQuery) return response.status(400).json({ reply: "Por favor, ingresa un vehículo." });
+    if (!userQuery) return response.status(400).json({ reply: "Ingresa un vehículo." });
     
     const lowerCaseQuery = userQuery.toLowerCase().trim();
     const queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 1);
 
-    // --- FILTRO ESTRICTO (El que funcionaba bien) ---
-    // Solo busca coincidencias literales. Sin matemáticas raras.
+    // FILTRO
     const candidates = transmissionData.filter(item => {
         const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
-        // Si el usuario pone "Accord 2000", buscamos que esas palabras existan en el registro.
         return queryParts.some(part => itemText.includes(part));
-    }).slice(0, 15); // Límite de 15 para velocidad
+    }).slice(0, 15);
 
-    // --- MANEJO DE "NO ENCONTRADO" (Tu nuevo mensaje) ---
     if (candidates.length === 0) {
         return response.status(200).json({ 
             reply: "No encontrado en mi base de datos, ¿Hay otra manera de nombrar a este vehículo?" 
         });
     }
 
-    // --- INTELIGENCIA ARTIFICIAL (Manteniendo lo que sí servía) ---
+    // IA
     const API_KEY = process.env.GEMINI_API_KEY;
-    // Usamos el modelo PROBADO
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent?key=${API_KEY}`;
-
     const contextForAI = JSON.stringify(candidates);
 
-    // PROMPT PULIDO (Sin instrucciones de typos, solo negocio)
     const prompt = `
         Experto en transmisiones.
-        DATOS DISPONIBLES: ${contextForAI}
-        BÚSQUEDA USUARIO: "${userQuery}"
+        DATOS: ${contextForAI}
+        BUSCAN: "${userQuery}"
 
-        REGLAS TÉCNICAS:
-        1. "SP" = Velocidades (Ej: 4 SP = 4 Velocidades).
-        2. "FWD" = Tracción Delantera. "RWD" = Tracción Trasera.
-        3. Años: "98-02" cubre todo el rango intermedio.
+        REGLAS:
+        1. "SP" = Velocidades.
+        2. "FWD" = Tracción Delantera. "RWD" = Trasera.
+        3. Solo automáticos (Ignora "Standard/Std").
+        4. Si te doy candidatos de otro modelo (ej: buscan Accord y te doy Civic), DESCÁRTALOS.
 
-        REGLA DE LIMPIEZA:
-        - Si el nombre del modelo dice "Standard", "Std" o "Estandar", ELIMINA esa palabra. Solo vendemos automáticos.
-        - Ejemplo: "Jetta Standard" -> Escribe solo "Jetta".
-
-        OBJETIVO:
-        1. Filtra los candidatos para encontrar SOLO lo que coincida con el Año y Modelo exacto que pide el usuario.
-        2. Si los candidatos que te di son solo del mismo año pero OTRO modelo (Ej: Usuario busca "Accord" y yo te di "Civic" solo porque coinciden en año), DESCÁRTALOS.
-        3. Si después de filtrar no queda nada válido, responde exactamente: "No encontrado en mi base de datos, ¿Hay otra manera de nombrar a este vehículo?".
-
-        FORMATO DE SALIDA:
+        FORMATO:
         - Sin saludos.
-        - Modelo de transmisión entre <b></b>.
-        
+        - Modelo en <b></b>.
+
         Ejemplo:
         "Para Honda Accord 2000:
         - <b>BAXA</b> (4 Velocidades, Motor 2.3L)"
@@ -99,11 +104,7 @@ export default async function handler(request, response) {
             body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
         });
 
-        if (!geminiResponse.ok) {
-            // Si falla el modelo latest, usamos un fallback simple en el error
-            throw new Error('Error de conexión IA');
-        }
-
+        if (!geminiResponse.ok) throw new Error('Conexión IA');
         const data = await geminiResponse.json();
         const textResponse = data.candidates[0].content.parts[0].text;
         
@@ -111,7 +112,6 @@ export default async function handler(request, response) {
 
     } catch (error) {
         console.error("Error IA:", error);
-        // Mensaje amigable si falla el servidor
-        return response.status(500).json({ reply: "Hubo un error momentáneo consultando al experto. Por favor intenta de nuevo." });
+        return response.status(500).json({ reply: "Error momentáneo del experto virtual." });
     }
 }
