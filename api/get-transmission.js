@@ -33,97 +33,92 @@ export default async function handler(request, response) {
         const userQuery = request.body.query;
         if (!userQuery) return response.status(400).json({ reply: "Ingresa un vehículo." });
 
-        const lowerCaseQuery = userQuery.toLowerCase().trim();
-        const queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 1);
+        const queryParts = userQuery.toLowerCase().trim().split(' ').filter(part => part.length > 1);
 
-        // --- FILTRO ESTRICTO (LOGICA "AND") ---
+        // FILTRO ESTRICTO (AND)
         const candidates = transmissionData.filter(item => {
             const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
             
-            // 1. Eliminar Manuales/Standard inmediatamente
             if (itemText.includes('standard') || itemText.includes('manual')) return false;
 
-            // 2. REGLA DE ORO: TODAS las palabras del usuario deben coincidir (AND)
             return queryParts.every(part => {
-                // EXCEPCIÓN INTELIGENTE PARA AÑOS:
-                // Si el usuario escribe un año (ej: "2000"), NO lo buscamos como texto exacto
-                // porque rompería los rangos (ej: "98-02"). Dejamos pasar el candidato 
-                // y dejamos que la IA verifique si el año encaja en el rango.
-                if (!isNaN(part) && part.length === 4) {
-                    return true; 
-                }
-                
-                // Para todo lo demás (Accord, Honda, Jetta), TIENE QUE ESTAR EN EL TEXTO.
+                if (!isNaN(part) && part.length === 4) return true; // Dejar pasar años para validación IA
                 return itemText.includes(part);
             });
-        }).slice(0, 15);
+        }).slice(0, 8); // BAJAMOS A 8 CANDIDATOS para mejorar velocidad
 
         if (candidates.length === 0) {
             return response.status(200).json({ 
-                reply: "No encontrado. Verifique que el modelo esté bien escrito." 
+                reply: "No encontrado en la base de datos con esos términos." 
             });
         }
 
-        // --- MODO HÍBRIDO (IA + RESPALDO MANUAL) ---
-        let finalReply = "";
+        // Contexto con DATOS COMPLETOS (Agregué explícitamente Trans Type para FWD/RWD)
+        const simplifiedContext = candidates.map(c => 
+            `Auto: ${c.Make} ${c.Model} (${c.Years}) | CódigoTrans: ${c['Trans Model']} | Info: ${c['Trans Type']} - ${c['Engine Type / Size']}`
+        ).join('\n');
 
+        // INTENTO IA
         try {
-            // INTENTO 1: IA (gemini-pro-latest)
             const API_KEY = process.env.GEMINI_API_KEY;
             const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent?key=${API_KEY}`;
             
-            const simplifiedContext = candidates.map(c => 
-                `${c.Make} ${c.Model} (${c.Years}) | Trans:${c['Trans Model']} | Motor:${c['Engine Type / Size']}`
-            ).join('\n');
-
+            // PROMPT "ROBÓTICO" (Sin saludos, formato forzado)
             const prompt = `
-                Actúa como experto en transmisiones. 
-                DATOS ENCONTRADOS (Candidatos):
+                DATOS:
                 ${simplifiedContext}
                 
-                BÚSQUEDA DEL USUARIO: "${userQuery}"
+                BUSCAN: "${userQuery}"
 
-                TU TAREA (FILTRADO FINAL):
-                1. El usuario busca un AÑO específico (ej: 2000). Revisa los rangos de años de los datos (ej: 98-02).
-                2. Si el año del usuario NO entra en el rango del dato, ELIMÍNALO.
-                3. Devuelve SOLO los que coincidan perfectamente en Modelo y Año.
+                TU TAREA:
+                Genera una lista HTML pura.
+
+                REGLAS OBLIGATORIAS:
+                1. NO digas "Hola", ni "Aquí están los resultados". EMPIEZA DIRECTO CON LA LISTA.
+                2. Pon el CÓDIGO DE TRANSMISIÓN en negritas <b></b>. NO el nombre del auto.
+                3. INCLUYE SIEMPRE si es FWD, RWD o 4WD.
+                4. Si el auto es "Golf" y el dato es "Golf Sportsvan", IGNÓRALO (son autos distintos).
                 
-                FORMATO: - <b>MODELO</b> (Detalles)
+                FORMATO EXACTO A USAR:
+                - <b>[CÓDIGO]</b> ([Motor] - [Tracción] - [Año])
+
+                Ejemplo de salida correcta:
+                - <b>09G</b> (2.5L - 6 SP FWD - 2015)
             `;
 
             const aiResponse = await fetch(GEMINI_API_URL, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+                body: JSON.stringify({ 
+                    contents: [{ parts: [{ text: prompt }] }],
+                    generationConfig: {
+                        temperature: 0.1, // Creatividad mínima = Más velocidad
+                        maxOutputTokens: 150 // Respuesta corta obligada
+                    }
+                })
             });
 
             const aiData = await aiResponse.json();
             const aiText = aiData?.candidates?.[0]?.content?.parts?.[0]?.text;
 
             if (aiText) {
-                finalReply = aiText;
+                return response.status(200).json({ reply: aiText });
             } else {
-                throw new Error("Respuesta IA vacía");
+                throw new Error("Respuesta vacía");
             }
 
         } catch (aiError) {
-            console.error("Fallo IA, activando Modo Manual:", aiError);
-            
-            // INTENTO 2: MODO MANUAL
-            // Si la IA falla, mostramos los candidatos que pasaron el filtro de texto estricto
+            // FALLBACK MANUAL MEJORADO (Por si la IA falla, que se vea bien)
+            console.error("Modo Manual activado:", aiError);
             let htmlList = candidates.map(item => {
-                let transCode = item['Trans Model'] || "N/A";
-                let details = `${item['Engine Type / Size']}, ${item['Trans Type']}`;
-                return `- <b>${transCode}</b> <span style="font-size:0.9em; color:#555">(${item.Model} ${item.Years} - ${details})</span>`;
+                let code = item['Trans Model'] || "N/A";
+                let info = `${item['Engine Type / Size']} - ${item['Trans Type']}`;
+                return `- <b>${code}</b> (${info})`;
             }).join('\n');
-
-            finalReply = `Resultados (Base de Datos Local):\n${htmlList}`;
+            return response.status(200).json({ reply: htmlList });
         }
 
-        return response.status(200).json({ reply: finalReply });
-
     } catch (error) {
-        console.error("Error Fatal:", error);
-        return response.status(500).json({ reply: `Error del sistema: ${error.message}` });
+        return response.status(500).json({ reply: `Error: ${error.message}` });
     }
 }
