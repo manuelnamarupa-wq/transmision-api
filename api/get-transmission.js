@@ -1,4 +1,4 @@
-// --- CÓDIGO FINAL (MODELO gemini-pro-latest) ---
+// --- CÓDIGO OPTIMIZADO PARA VELOCIDAD Y SEMÁNTICA ---
 const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmision-api/main/api/transmissions.json';
 
 let transmissionData = [];
@@ -8,82 +8,76 @@ async function loadData() {
     if (!dataLoaded) {
         try {
             const response = await fetch(DATA_URL);
-            if (!response.ok) throw new Error('La base de datos JSON no se pudo descargar.');
+            if (!response.ok) throw new Error('Error descargando BD.');
             transmissionData = await response.json();
             dataLoaded = true;
-            console.log(`Base de datos cargada: ${transmissionData.length} registros.`);
+            console.log(`Datos cargados: ${transmissionData.length}`);
         } catch (error) {
-            console.error('Error crítico al cargar transmissions.json:', error);
+            console.error('Error BD:', error);
         }
     }
 }
 
 export default async function handler(request, response) {
-    // Configuración CORS
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-    if (request.method === 'OPTIONS') {
-        return response.status(200).end();
-    }
+    if (request.method === 'OPTIONS') return response.status(200).end();
     
     await loadData();
     if (!dataLoaded || transmissionData.length === 0) {
-        return response.status(500).json({ reply: "Error: La plantilla de datos no está disponible en este momento." });
+        return response.status(500).json({ reply: "Error: Base de datos no disponible." });
     }
 
     const userQuery = request.body.query;
-    if (!userQuery) {
-        return response.status(400).json({ reply: "Por favor, ingresa un vehículo para buscar." });
-    }
+    if (!userQuery) return response.status(400).json({ reply: "Ingresa un vehículo." });
     
-    // Filtro rápido (Javascript)
     const lowerCaseQuery = userQuery.toLowerCase().trim();
     const queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 1);
 
+    // OPTIMIZACIÓN DE VELOCIDAD:
+    // Bajamos a 15 candidatos. Menos datos para leer = IA más rápida.
     const candidates = transmissionData.filter(item => {
         const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
         return queryParts.some(part => itemText.includes(part));
-    }).slice(0, 25); 
+    }).slice(0, 15); 
 
     if (candidates.length === 0) {
-        return response.status(200).json({ reply: `No se encontraron coincidencias iniciales para "${userQuery}" en la plantilla.` });
+        return response.status(200).json({ reply: `No encontré coincidencias para "${userQuery}".` });
     }
 
-    // --- ANÁLISIS INTELIGENTE CON IA ---
     const API_KEY = process.env.GEMINI_API_KEY;
-    
-    // VOLVEMOS EXACTAMENTE AL MODELO QUE TE FUNCIONÓ: gemini-pro-latest
+    // Mantenemos el modelo que te funciona
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent?key=${API_KEY}`;
 
     const contextForAI = JSON.stringify(candidates);
 
-    // Prompt con las instrucciones de SP, FWD y Negritas
+    // NUEVO PROMPT CON REGLA ANTI-ESTÁNDAR
     const prompt = `
-        Actúa como un experto en transmisiones.
-        DATOS (JSON):
-        ---
-        ${contextForAI}
-        ---
-        USUARIO BUSCA: "${userQuery}"
+        Experto en transmisiones AUTOMÁTICAS.
+        DATOS: ${contextForAI}
+        BUSCAN: "${userQuery}"
 
-        REGLAS TÉCNICAS:
-        1. "SP" = Velocidades/Cambios (Ej: 4 SP = 4 Cambios).
+        REGLAS TÉCNICAS OBLIGATORIAS:
+        1. "SP" = Velocidades (Ej: 4 SP = 4 Cambios).
         2. "FWD" = Tracción Delantera. "RWD" = Tracción Trasera.
-        3. Años: "98-02" incluye 1998, 1999, 2000, 2001, 2002.
+        3. Años: "98-02" incluye el rango completo.
 
-        INSTRUCCIONES DE RESPUESTA:
-        1. NO saludes. Sé directo.
-        2. Filtra estrictamente por Año y Modelo.
-        3. Si pide "5 cambios", descarta las que no sean "5 SP".
-        4. Escribe el modelo de transmisión ("Trans Model") entre etiquetas <b></b> (negritas HTML).
-        5. Explica diferencias si hay varias opciones.
+        REGLA DE SEMÁNTICA (CRÍTICA):
+        - Solo vendemos automáticos.
+        - Si el nombre del modelo en los datos dice "Standard", "Std" o "Estandar", ELIMINA esa palabra del nombre del auto. Causa confusión con transmisión manual.
+        - Ejemplo: Si dice "Golf Standard", tú escribe solo "Golf".
+        - Ejemplo: Si dice "Golf Sportwagen", ese déjalo igual.
 
-        Ejemplo de respuesta:
-        "Para Honda Accord 2000:
-        - <b>BAXA</b> (4 Cambios, Motor 2.3L)
-        - <b>B7XA</b> (4 Cambios, Motor 3.0L)"
+        FORMATO DE SALIDA:
+        1. Sin saludos.
+        2. Modelo de transmisión ("Trans Model") entre <b></b>.
+        3. Filtra estrictamente por año.
+
+        Ejemplo:
+        "Para VW Golf 2015:
+        - <b>09G</b> (6 Cambios, Motor 2.5L)"
     `;
 
     try {
@@ -94,9 +88,8 @@ export default async function handler(request, response) {
         });
 
         if (!geminiResponse.ok) {
-            // Capturamos el error exacto si vuelve a fallar el modelo
             const errText = await geminiResponse.text();
-            throw new Error(`Error IA (${geminiResponse.status}): ${errText}`);
+            throw new Error(`Error IA: ${errText}`);
         }
 
         const data = await geminiResponse.json();
@@ -105,9 +98,7 @@ export default async function handler(request, response) {
         return response.status(200).json({ reply: textResponse });
 
     } catch (error) {
-        console.error("Error en la fase de IA:", error);
-        // Mostramos el error técnico en pantalla para no estar a ciegas
+        console.error("Error:", error);
         return response.status(500).json({ reply: `Error del sistema: ${error.message}` });
     }
 }
-// --- FIN DEL CÓDIGO ---
