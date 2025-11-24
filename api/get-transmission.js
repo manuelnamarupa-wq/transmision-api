@@ -12,20 +12,16 @@ async function getData() {
         return cachedData;
     } catch (e) {
         console.error("Error BD:", e);
-        throw e; // Lanzamos el error para verlo en pantalla
+        throw e;
     }
 }
 
-// --- FUNCIÓN MATEMÁTICA BLINDADA ---
-// (Aquí agregué protecciones para que no falle si el dato viene sucio)
+// --- VALIDACIÓN MATEMÁTICA (Para que Golf 2015 no traiga Golf 1990) ---
 function isYearMatch(dbYearString, userYear) {
     try {
         if (!dbYearString || !userYear) return false;
-        
-        // Aseguramos que sean strings antes de procesar
         const strDbYear = String(dbYearString); 
         const strUserYear = String(userYear);
-
         const uYear = parseInt(strUserYear.slice(-2)); 
         const cleanStr = strDbYear.replace(/[()]/g, ''); 
         
@@ -33,8 +29,6 @@ function isYearMatch(dbYearString, userYear) {
             const parts = cleanStr.split('-');
             let start = parseInt(parts[0]);
             let end = parseInt(parts[1]);
-            
-            // Si no son números válidos, ignoramos este registro
             if (isNaN(start) || isNaN(end)) return false;
 
             if (start > end) { // Caso 98-02
@@ -45,7 +39,7 @@ function isYearMatch(dbYearString, userYear) {
         }
         return cleanStr.includes(uYear.toString());
     } catch (err) {
-        return false; // Si falla la matemática, simplemente decimos que no coincide
+        return false;
     }
 }
 
@@ -58,16 +52,10 @@ export default async function handler(request, response) {
     if (request.method === 'OPTIONS') return response.status(200).end();
 
     try {
-        // 1. VERIFICACIÓN API KEY
-        if (!process.env.GEMINI_API_KEY) {
-            throw new Error("Falta la API KEY en Vercel.");
-        }
-
-        // 2. CARGA DE DATOS
         const transmissionData = await getData();
         if (!transmissionData || transmissionData.length === 0) {
             cachedData = null; 
-            throw new Error("Base de datos vacía o no accesible.");
+            throw new Error("Base de datos vacía.");
         }
 
         const userQuery = request.body.query;
@@ -80,14 +68,7 @@ export default async function handler(request, response) {
 
         // --- FILTRO ESTRICTO ---
         const candidates = transmissionData.filter(item => {
-            // Protección contra datos nulos en el JSON
-            const mk = item.Make || "";
-            const md = item.Model || "";
-            const yr = item.Years || "";
-            const tt = item['Trans Type'] || "";
-            const et = item['Engine Type / Size'] || "";
-
-            const itemText = `${mk} ${md} ${yr} ${tt} ${et}`.toLowerCase();
+            const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
             
             if (itemText.includes('standard') || itemText.includes('manual')) return false;
 
@@ -95,21 +76,22 @@ export default async function handler(request, response) {
             if (!textMatch) return false;
 
             if (userYear) {
-                return isYearMatch(yr, userYear);
+                return isYearMatch(item.Years, userYear);
             }
             return true;
         }).slice(0, 10); 
 
         if (candidates.length === 0) {
             return response.status(200).json({ 
-                reply: "No encontrado para ese año y modelo específico (Filtro matemático)." 
+                reply: "No encontrado para ese año y modelo específico (Filtro estricto)." 
             });
         }
 
-        // --- IA ---
+        // --- IA CON EL MODELO CORRECTO ---
         const API_KEY = process.env.GEMINI_API_KEY;
-        // Usamos gemini-pro estándar para descartar problemas de versión
-        const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${API_KEY}`;
+        
+        // CORRECCIÓN AQUÍ: Usamos 'gemini-pro-latest' que es el que te funcionaba
+        const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent?key=${API_KEY}`;
         
         const simplifiedContext = candidates.map(c => 
             `Auto: ${c.Make} ${c.Model} | Años: ${c.Years} | Trans: ${c['Trans Model']} | Info: ${c['Engine Type / Size']}`
@@ -158,9 +140,9 @@ export default async function handler(request, response) {
 
     } catch (error) {
         console.error("Error Real:", error);
-        // AQUÍ ESTÁ EL CAMBIO: Ahora te muestro el error real en pantalla
+        // Mantenemos el reporte de error por si acaso, pero ya no debería salir
         return response.status(500).json({ 
-            reply: `ERROR TÉCNICO (Mándame captura de esto): ${error.message}` 
+            reply: `ERROR TÉCNICO: ${error.message}` 
         });
     }
 }
