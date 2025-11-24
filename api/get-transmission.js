@@ -1,25 +1,23 @@
-// --- CÓDIGO FINAL: URL SEGURA + CACHÉ EN MEMORIA ---
+// --- CÓDIGO BLINDADO (CACHÉ + SEGURIDAD IA) ---
 
 const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmision-api/main/api/transmissions.json';
 
-// --- EL SECRETO DE LA VELOCIDAD ---
-// Al declarar esta variable AFUERA de la función 'handler',
-// Vercel la mantiene viva en la memoria RAM entre búsquedas.
-// Así no tenemos que descargar el archivo cada vez.
+// Variable global para mantener los datos en memoria RAM (Velocidad)
 let cachedData = null;
 
 async function getData() {
-    // Si ya tenemos datos en memoria, ¡los usamos al instante!
-    if (cachedData) {
-        return cachedData;
-    }
+    if (cachedData) return cachedData;
     
-    // Si no, los descargamos por única vez
-    console.log("Descargando base de datos de GitHub...");
-    const response = await fetch(DATA_URL);
-    if (!response.ok) throw new Error('Error descargando JSON');
-    cachedData = await response.json();
-    return cachedData;
+    console.log("Descargando BD de GitHub...");
+    try {
+        const response = await fetch(DATA_URL);
+        if (!response.ok) throw new Error('Error de descarga');
+        cachedData = await response.json();
+        return cachedData;
+    } catch (e) {
+        console.error("Error crítico BD:", e);
+        return [];
+    }
 }
 
 export default async function handler(request, response) {
@@ -31,21 +29,22 @@ export default async function handler(request, response) {
     if (request.method === 'OPTIONS') return response.status(200).end();
 
     try {
-        // 1. OBTENER DATOS (RÁPIDO)
+        // 1. CARGA DE DATOS
         const transmissionData = await getData();
 
         if (!transmissionData || transmissionData.length === 0) {
-            return response.status(500).json({ reply: "Error: Base de datos vacía." });
+            // Intento desesperado de recarga si la caché falló
+            cachedData = null; 
+            return response.status(500).json({ reply: "Error: Base de datos no disponible. Reintenta." });
         }
 
         const userQuery = request.body.query;
-        if (!userQuery) return response.status(400).json({ reply: "Ingresa un vehículo." });
+        if (!userQuery) return response.status(400).json({ reply: "Escribe un vehículo." });
 
-        // 2. FILTRO (OPTIMIZADO)
+        // 2. FILTRO (Limitado a 10 para velocidad)
         const lowerCaseQuery = userQuery.toLowerCase().trim();
         const queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 1);
 
-        // Filtramos a 10 candidatos para que la IA lea menos
         const candidates = transmissionData.filter(item => {
             const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
             return queryParts.some(part => itemText.includes(part));
@@ -57,15 +56,15 @@ export default async function handler(request, response) {
             });
         }
 
-        // 3. PREPARAR TEXTO COMPACTO PARA LA IA (MENOS DATOS = MÁS VELOCIDAD)
+        // 3. CONTEXTO SIMPLIFICADO
         const simplifiedContext = candidates.map(c => 
-            `${c.Make} ${c.Model} (${c.Years}) | Motor:${c['Engine Type / Size']} | Trans:${c['Trans Model']} (${c['Trans Type']})`
+            `${c.Make} ${c.Model} (${c.Years}) | ${c['Trans Model']} | ${c['Engine Type / Size']}`
         ).join('\n');
 
-        // 4. CONEXIÓN IA
+        // 4. IA CON CONFIGURACIÓN DE SEGURIDAD
         const API_KEY = process.env.GEMINI_API_KEY;
-        // Usamos el modelo ESTABLE
-        const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent?key=${API_KEY}`;
+        // Usamos 'gemini-pro' estándar para máxima estabilidad
+        const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${API_KEY}`;
 
         const prompt = `
             Experto en transmisiones.
@@ -74,16 +73,15 @@ export default async function handler(request, response) {
             BUSCAN: "${userQuery}"
 
             REGLAS:
-            1. FWD=Delantera, RWD=Trasera, SP=Velocidades.
-            2. Ignora "Standard/Manual". Solo automáticos.
-            3. Filtra estrictamente por Año.
-
+            1. Solo automáticos (Ignora "Standard").
+            2. Filtra estrictamente por Año y Modelo.
+            
             FORMATO:
             - <b>MODELO</b> (Detalles)
 
             Ejemplo:
-            "Para Honda Accord 2000:
-            - <b>BAXA</b> (4 Velocidades, 2.3L)"
+            "Para Accord 2000:
+            - <b>BAXA</b> (4 Vel, 2.3L)"
         `;
 
         const geminiResponse = await fetch(GEMINI_API_URL, {
@@ -91,25 +89,42 @@ export default async function handler(request, response) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
                 contents: [{ parts: [{ text: prompt }] }],
-                // Configuración para respuesta rápida (menos creativa)
+                // Configuración para que responda rápido y NO BLOQUEE NADA
+                safetySettings: [
+                    { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_ONLY_HIGH" },
+                    { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
+                    { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_ONLY_HIGH" },
+                    { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_ONLY_HIGH" }
+                ],
                 generationConfig: {
-                    temperature: 0.1, // Muy robótico y rápido
-                    maxOutputTokens: 150 // Respuesta corta obligatoria
+                    temperature: 0.1,
+                    maxOutputTokens: 200
                 }
             }),
         });
 
-        if (!geminiResponse.ok) throw new Error('Error al conectar con el Experto Virtual.');
-        
+        if (!geminiResponse.ok) {
+            const errText = await geminiResponse.text();
+            throw new Error(`Google Error: ${errText}`);
+        }
+
         const data = await geminiResponse.json();
+
+        // --- AQUÍ OCURRÍA EL ERROR ANTERIOR ---
+        // Verificamos si realmente hay candidatos antes de leer la posición [0]
+        if (!data.candidates || data.candidates.length === 0) {
+            console.error("Respuesta vacía de IA:", JSON.stringify(data));
+            // Si la IA no quiso responder, damos una respuesta genérica basada en los datos crudos
+            return response.status(200).json({ 
+                reply: `Encontré posibles coincidencias como: <b>${candidates[0]['Trans Model']}</b> para ${candidates[0].Model}. Por favor especifica más el año o motor.` 
+            });
+        }
+
         const textResponse = data.candidates[0].content.parts[0].text;
-        
         return response.status(200).json({ reply: textResponse });
 
     } catch (error) {
-        console.error("Error General:", error);
-        // Si hay error, limpiamos la caché por si acaso estaba corrupta
-        cachedData = null;
+        console.error("Error Handler:", error);
         return response.status(500).json({ reply: `Error del sistema: ${error.message}` });
     }
 }
