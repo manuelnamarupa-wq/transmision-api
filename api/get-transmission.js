@@ -1,4 +1,5 @@
-// --- CÓDIGO DEPURADO Y MEJORADO ---
+// --- CÓDIGO FINAL DE RECUPERACIÓN ---
+// 1. URL de GitHub (Modo RAW para que no falle la descarga)
 const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmision-api/main/api/transmissions.json';
 
 let transmissionData = [];
@@ -6,17 +7,22 @@ let dataLoaded = false;
 
 async function loadData() {
     if (!dataLoaded) {
-        console.log("Descargando datos de GitHub...");
-        const response = await fetch(DATA_URL);
-        if (!response.ok) throw new Error(`Error descargando JSON: ${response.status} ${response.statusText}`);
-        transmissionData = await response.json();
-        dataLoaded = true;
-        console.log(`Datos cargados: ${transmissionData.length} registros.`);
+        console.log("Iniciando descarga de datos...");
+        try {
+            const response = await fetch(DATA_URL);
+            if (!response.ok) throw new Error(`Error HTTP: ${response.status}`);
+            transmissionData = await response.json();
+            dataLoaded = true;
+            console.log(`Datos cargados exitosamente: ${transmissionData.length} registros.`);
+        } catch (error) {
+            console.error('Error crítico descargando JSON:', error);
+            throw error; // Lanzamos el error para que el handler lo detecte
+        }
     }
 }
 
 export default async function handler(request, response) {
-    // 1. Configuración CORS
+    // Configuración CORS estándar
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -26,11 +32,10 @@ export default async function handler(request, response) {
     }
 
     try {
-        // 2. Carga de datos
         await loadData();
         
         if (!dataLoaded || transmissionData.length === 0) {
-            throw new Error("La base de datos está vacía o no se pudo cargar.");
+            throw new Error("La base de datos no se pudo cargar correctamente.");
         }
 
         const userQuery = request.body.query;
@@ -38,44 +43,47 @@ export default async function handler(request, response) {
             return response.status(400).json({ reply: "Por favor, escribe un vehículo." });
         }
 
-        // 3. Filtrado rápido (Reducimos a 15 candidatos para evitar Timeouts de Vercel)
+        // Filtro rápido de candidatos
         const lowerCaseQuery = userQuery.toLowerCase().trim();
         const queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 1);
 
         const candidates = transmissionData.filter(item => {
             const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
             return queryParts.some(part => itemText.includes(part));
-        }).slice(0, 15); // LÍMITE DE SEGURIDAD: 15 items
+        }).slice(0, 20); // Enviamos 20 candidatos para asegurar contexto
 
         if (candidates.length === 0) {
-            return response.status(200).json({ reply: `No encontré ese modelo en la base de datos (${userQuery}). Intenta con otro año o modelo.` });
+            return response.status(200).json({ reply: `No encontré coincidencias para "${userQuery}" en la base de datos.` });
         }
 
-        // 4. Conexión con IA (Usamos el modelo FLASH que es más rápido)
+        // --- CONEXIÓN CON IA (MODELO ESTABLE) ---
         const API_KEY = process.env.GEMINI_API_KEY;
-        if (!API_KEY) throw new Error("Falta la GEMINI_API_KEY en las variables de entorno de Vercel.");
-
-        const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`;
+        
+        // CAMBIO CRUCIAL: Usamos 'gemini-pro' a secas. Es el más compatible.
+        const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${API_KEY}`;
 
         const contextForAI = JSON.stringify(candidates);
 
         const prompt = `
-            Actúa como experto en autopartes.
+            Actúa como experto en transmisiones automáticas.
             DATOS (JSON): ${contextForAI}
-            BÚSQUEDA: "${userQuery}"
+            BÚSQUEDA USUARIO: "${userQuery}"
             
-            REGLAS:
-            - SP = Velocidades (ej: 4 SP = 4 Velocidades).
-            - FWD = Tracción Delantera, RWD = Trasera.
-            - Años: "98-02" cubre 98, 99, 00, 01, 02.
+            DICCIONARIO:
+            - "SP" = Velocidades (4 SP = 4 Velocidades).
+            - "FWD" = Tracción Delantera. "RWD" = Tracción Trasera.
+            - Años: "98-02" significa 1998 a 2002.
             
-            TAREA:
-            1. Devuelve SOLO las transmisiones compatibles con el año y características pedidas.
-            2. Usa etiquetas <b></b> para el modelo de transmisión ("Trans Model").
-            3. Si hay varias opciones, explica la diferencia entre paréntesis.
-            4. Sé directo. Sin saludos.
+            OBJETIVO:
+            Devuelve una lista HTML limpia con las transmisiones compatibles.
+            
+            REGLAS DE FORMATO:
+            1. NO saludes.
+            2. Pon el código de transmisión ("Trans Model") entre etiquetas <b></b>.
+            3. Si el usuario pide "X velocidades", filtra estrictamente.
+            4. Diferencia las opciones por motor o tracción si hay varias.
 
-            EJEMPLO SALIDA:
+            EJEMPLO DE RESPUESTA:
             "Para Honda Accord 2000:
             - <b>BAXA</b> (4 Velocidades, Motor 2.3L)
             - <b>B7XA</b> (4 Velocidades, Motor 3.0L)"
@@ -88,22 +96,23 @@ export default async function handler(request, response) {
         });
 
         if (!aiResponse.ok) {
-            const errorDetails = await aiResponse.text();
-            throw new Error(`Error de Google AI: ${aiResponse.status} - ${errorDetails}`);
+            const errorText = await aiResponse.text();
+            throw new Error(`Error de Google AI (${aiResponse.status}): ${errorText}`);
         }
 
         const data = await aiResponse.json();
         const textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text;
 
-        if (!textResponse) throw new Error("La IA no devolvió texto.");
+        if (!textResponse) throw new Error("La IA no devolvió respuesta de texto.");
 
         return response.status(200).json({ reply: textResponse });
 
     } catch (error) {
-        console.error("ERROR EN VERCEL:", error);
-        // IMPORTANTE: Devolvemos el error exacto al frontend para que sepas qué pasa
+        console.error("ERROR EN EL SERVIDOR:", error);
+        // Devolvemos el error real para verlo en pantalla si vuelve a fallar
         return response.status(500).json({ 
-            reply: `Error Técnico: ${error.message}` 
+            reply: `Error del sistema: ${error.message}` 
         });
     }
 }
+// --- FIN DEL CÓDIGO ---
