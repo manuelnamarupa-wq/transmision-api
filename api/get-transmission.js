@@ -1,6 +1,9 @@
-// --- INICIO DEL CÓDIGO BACKEND (Vercel) ---
+// --- INICIO DEL CÓDIGO BACKEND ---
+
+// 1. URL de la base de datos (La que confirmamos que funciona en el chat anterior)
 const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmision-api/main/api/transmissions.json';
 
+// Variable para caché
 let transmissionData = [];
 let dataLoaded = false;
 
@@ -19,7 +22,7 @@ async function loadData() {
 }
 
 export default async function handler(request, response) {
-    // 1. CORS (Permisos para que Shopify pueda consultar)
+    // Configuración CORS
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -27,8 +30,7 @@ export default async function handler(request, response) {
     if (request.method === 'OPTIONS') {
         return response.status(200).end();
     }
-
-    // 2. Cargar datos y validar input
+    
     await loadData();
     if (!dataLoaded || transmissionData.length === 0) {
         return response.status(500).json({ reply: "Error: La base de datos no está disponible." });
@@ -39,63 +41,56 @@ export default async function handler(request, response) {
         return response.status(400).json({ reply: "Por favor, ingresa un vehículo para buscar." });
     }
 
-    // 3. Pre-filtrado en JS (Búsqueda amplia)
-    // Buscamos coincidencias parciales para reducir los datos enviados a la IA.
-    // Usamos 'some' para que si el usuario pone "Accord 2000" y el JSON dice "98-02", 
-    // al menos la palabra "Accord" traiga el registro.
+    // Filtro inicial (Búsqueda amplia en JS para no enviar todo a la IA)
     const lowerCaseQuery = userQuery.toLowerCase().trim();
     const queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 1);
 
     const candidates = transmissionData.filter(item => {
-        // Creamos un string gigante con los datos del registro para buscar ahí
+        // Concatenamos todo para buscar coincidencias parciales
         const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
-        // Si ALGUNA parte de la búsqueda (ej: "accord") está en el registro, lo consideramos candidato.
         return queryParts.some(part => itemText.includes(part));
-    }).slice(0, 30); // Aumentamos ligeramente el límite a 30 para asegurar cobertura
+    }).slice(0, 30); // Enviamos hasta 30 candidatos a la IA
 
     if (candidates.length === 0) {
-        return response.status(200).json({ reply: `No encontré coincidencias en la base de datos para "${userQuery}".` });
+        return response.status(200).json({ reply: `No se encontraron coincidencias en la base de datos para "${userQuery}".` });
     }
 
-    // 4. Preparar Prompt para Gemini
+    // --- ANÁLISIS INTELIGENTE CON IA (PROMPT REFINADO) ---
     const API_KEY = process.env.GEMINI_API_KEY;
+    // Usamos gemini-1.5-flash o gemini-pro, ambos funcionan bien.
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${API_KEY}`;
-
+    
     const contextForAI = JSON.stringify(candidates);
 
-    // AQUÍ ESTÁ LA MAGIA: Instrucciones precisas para la IA
+    // AQUÍ ESTÁ LA LÓGICA EXPERTA QUE PEDISTE:
     const prompt = `
-    Actúa como un experto técnico en transmisiones automáticas.
-    
-    CONTEXTO DE DATOS:
-    Te proporciono una lista de candidatos en JSON:
-    ${contextForAI}
-    
-    GLOSARIO TÉCNICO OBLIGATORIO:
-    - "SP" significa "Velocidades" o "Cambios". (Ej: 4 SP = 4 Cambios).
-    - "FWD" significa "Tracción Delantera".
-    - "RWD" significa "Tracción Trasera".
-    - "4WD/AWD" significa "Tracción en las 4 ruedas".
-    - Los años en el JSON como "98-02" cubren 1998, 1999, 2000, 2001, 2002.
-    
-    SOLICITUD DEL USUARIO: "${userQuery}"
-    
-    TU TAREA:
-    1. Identifica el vehículo exacto (Año, Modelo, Motor).
-    2. Filtra estrictamente por el año solicitado. Si el usuario pide "2000", el registro "98-02" ES VÁLIDO.
-    3. Si el usuario pide "5 cambios" o "5 velocidades", descarta las transmisiones que no sean "5 SP".
-    
-    FORMATO DE RESPUESTA (ESTRICTO HTML):
-    - No saludes. No des explicaciones introductorias.
-    - Devuelve una lista donde el nombre de la transmisión (Trans Model) esté dentro de etiquetas <b></b>.
-    - Si hay varias opciones compatibles para ese año, explica la diferencia (Cilindraje, Tracción, etc).
-    
-    Ejemplo de salida deseada:
-    "Para Honda Accord 2000 existen estas opciones:
-    - <b>B7XA</b> (Motor V6 3.0L, 4 Cambios)
-    - <b>BAXA</b> (Motor L4 2.3L, 4 Cambios)"
+        Actúa como un sistema de inventario experto. Tu fuente de verdad es este JSON:
+        ---
+        ${contextForAI}
+        ---
+        Consulta del usuario: "${userQuery}"
 
-    Si no hay ninguna coincidencia técnica válida para el año/modelo, responde: "No se encontró la transmisión exacta para este modelo y año."
+        REGLAS DE INTERPRETACIÓN TÉCNICA:
+        1. "SP" = Velocidades/Cambios (Ej: "4 SP" son 4 velocidades/cambios).
+        2. "FWD" = Tracción Delantera. "RWD" = Tracción Trasera. "4WD/AWD" = Tracción total.
+        3. Años: Si el JSON dice "98-02", incluye los años 1998, 1999, 2000, 2001, 2002.
+        
+        OBJETIVO:
+        Responde de forma ESTRICTA y DIRECTA. Sin saludos ("Hola"), sin introducciones ("Encontré esto"). Solo datos.
+        
+        INSTRUCCIONES DE SALIDA:
+        1. Filtra estrictamente por el AÑO y MODELO que pide el usuario.
+        2. Si el usuario pide "5 cambios", descarta las que no sean "5 SP".
+        3. Devuelve una lista HTML.
+        4. El código de la transmisión ("Trans Model") debe estar SIEMPRE dentro de etiquetas <b></b>.
+        5. Si hay varias opciones para el mismo coche, explica la diferencia entre paréntesis (Motor, Tracción, etc).
+
+        Ejemplo de formato de respuesta deseada:
+        "Para Honda Accord 2000:
+        - <b>B7XA</b> (Motor V6, 4 Velocidades)
+        - <b>BAXA</b> (Motor L4, 4 Velocidades)"
+
+        Si no hay coincidencia exacta técnica, responde: "No se encontró transmisión compatible exacta para esos datos."
     `;
 
     try {
@@ -105,17 +100,16 @@ export default async function handler(request, response) {
             body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
         });
 
-        if (!geminiResponse.ok) throw new Error('Error en la API de IA');
+        if (!geminiResponse.ok) throw new Error('Error API IA');
 
         const data = await geminiResponse.json();
-        // Verificación de seguridad por si la IA falla
-        const textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "Error al procesar la respuesta de la IA.";
+        const textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "Error procesando respuesta.";
         
         return response.status(200).json({ reply: textResponse });
 
     } catch (error) {
         console.error("Error IA:", error);
-        return response.status(500).json({ reply: "Ocurrió un error técnico consultando al experto." });
+        return response.status(500).json({ reply: "Error interno del servidor." });
     }
 }
-// --- FIN DEL CÓDIGO BACKEND ---
+// --- FIN DEL CÓDIGO ---
