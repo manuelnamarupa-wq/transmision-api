@@ -2,7 +2,7 @@
 
 // 1. URL de nuestra base de datos JSON en GitHub.
 //    ¡IMPORTANTE! Verifica que tu usuario y nombre de repo sean correctos.
-const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmision-api/main/transmissions.json';
+const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmision-api/main/api/transmissions.json';
 
 // Variable para guardar los datos en memoria.
 let transmissionData = [];
