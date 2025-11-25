@@ -1,6 +1,6 @@
 const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmision-api/main/api/transmissions.json';
 
-// Cache en memoria
+// --- SISTEMA DE CACHÉ EN MEMORIA ---
 let transmissionData = [];
 let uniqueModelsStr = ""; 
 let dataLoaded = false;
@@ -14,7 +14,6 @@ async function loadData() {
             if (!response.ok) throw new Error('Error GitHub Raw.');
             transmissionData = await response.json();
             
-            // Pre-proceso para el corrector
             const modelSet = new Set(transmissionData.map(item => `${item.Make} ${item.Model}`));
             uniqueModelsStr = Array.from(modelSet).join(", ");
 
@@ -44,7 +43,7 @@ export default async function handler(request, response) {
     const userQuery = request.body.query;
     if (!userQuery) return response.status(400).json({ reply: "Ingresa un vehículo." });
     
-    // Limpieza
+    // 3. Limpieza
     const expandedQuery = userQuery.replace(/\b(\d{2})\b/g, (match) => {
         const n = parseInt(match, 10);
         if (n >= 80 && n <= 99) return `19${match}`;
@@ -69,26 +68,26 @@ export default async function handler(request, response) {
     const API_KEY = process.env.GEMINI_API_KEY;
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
-    // --- ESCENARIO 1: NO HAY RESULTADOS (CORRECTOR INTELIGENTE) ---
+    // --- ESCENARIO 1: CORRECTOR (MODIFICADO PARA INCLUIR AÑO) ---
     if (candidates.length === 0) {
         
+        // 1. Detectamos si el usuario escribió un año (ej: 2000 o 1998)
+        const yearRegex = /\b(19|20)\d{2}\b/;
+        const match = userQuery.match(yearRegex);
+        const originalYear = match ? match[0] : null;
+
         const correctionPrompt = `
-            ACTÚA COMO: API de corrección ortográfica de autos.
+            ACTÚA COMO: API JSON de corrección ortográfica.
             LISTA VÁLIDA: [${uniqueModelsStr}]
             BÚSQUEDA USUARIO: "${userQuery}"
 
             TAREA:
-            1. Busca similitudes fonéticas.
-            2. Si encuentras una corrección probable (Ej: "Liberti" -> "Jeep Liberty"), responde EN JSON.
-            3. Si no encuentras nada, responde JSON con null.
-
+            1. Encuentra el vehículo de la LISTA VÁLIDA que suene más parecido a la búsqueda.
+            2. Ignora el año para la comparación, concéntrate en el nombre.
+            
             FORMATO JSON OBLIGATORIO:
-            {
-                "found": true,
-                "text": "¿Quisiste decir <b>Jeep Liberty 2002</b>?",
-                "suggestion": "Jeep Liberty 2002"
-            }
-            O si no encuentras:
+            { "found": true, "suggestion": "Jeep Liberty" }
+            O si no encuentras nada parecido:
             { "found": false }
         `;
 
@@ -99,35 +98,43 @@ export default async function handler(request, response) {
                 body: JSON.stringify({ contents: [{ parts: [{ text: correctionPrompt }] }] }),
             });
 
-            if (!geminiResponse.ok) throw new Error("Error IA Corrector");
+            if (!geminiResponse.ok) throw new Error("Error IA");
             const data = await geminiResponse.json();
             
-            // Limpiamos la respuesta para obtener solo el JSON (a veces la IA pone bloques de código ```json ... ```)
             let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
             rawText = rawText.replace(/```json|```/g, '').trim();
-            
             const parsed = JSON.parse(rawText);
 
             if (parsed.found && parsed.suggestion) {
-                // AQUÍ ESTÁ LA MAGIA: Devolvemos el texto Y la sugerencia limpia
+                let finalSuggestion = parsed.suggestion;
+                
+                // LÓGICA DE RESCATE DE AÑO:
+                // Si el usuario puso año, pero la IA no lo incluyó, lo pegamos nosotros.
+                if (originalYear && !finalSuggestion.includes(originalYear)) {
+                    finalSuggestion = `${finalSuggestion} ${originalYear}`;
+                }
+
+                // Generamos el texto de pregunta limpio
+                const questionText = `¿Quisiste decir <b>${finalSuggestion}</b>?`;
+
                 return response.status(200).json({ 
-                    reply: parsed.text, 
-                    suggestion: parsed.suggestion // Este campo lo usará el botón del frontend
+                    reply: questionText, 
+                    suggestion: finalSuggestion 
                 });
             } else {
                 return response.status(200).json({ reply: `No se encontraron coincidencias para "${userQuery}".` });
             }
 
         } catch (error) {
-            console.error("Error Corrector:", error);
             return response.status(200).json({ reply: `No se encontraron coincidencias para "${userQuery}".` });
         }
     }
 
-    // --- ESCENARIO 2: FLUJO NORMAL ---
+    // --- ESCENARIO 2: BÚSQUEDA NORMAL ---
     const contextForAI = JSON.stringify(candidates);
 
     const prompt = `
+        [SYSTEM: STRICT DIRECT OUTPUT.]
         ROL: Catálogo experto de transmisiones.
         DATOS (JSON):
         ---
@@ -136,12 +143,12 @@ export default async function handler(request, response) {
         INPUT USUARIO: "${expandedQuery}"
 
         REGLAS DE NEGOCIO:
-        1. MUESTRA TODO: Si hay códigos distintos, genera líneas distintas.
-        2. Búsqueda amplia: Si buscan "Cherokee", incluye "Grand Cherokee".
-        3. Formato: <b>CODIGO</b> (sin asteriscos). "AVO"/"TBD" = "Modelo por confirmar".
-        4. Desglose: Muestra Motor y Tracción.
+        1. MUESTRA TODO: Desagrega todas las variantes.
+        2. INCLUSIÓN: Si buscan "Cherokee", muestra "Grand Cherokee".
+        3. FORMATO: <b>CODIGO</b> (sin asteriscos). "AVO"/"TBD" = "Modelo por confirmar".
+        4. DETALLE: Muestra Motor y Tracción.
 
-        Ejemplo Esperado:
+        Ejemplo de Respuesta Directa:
         "Resultados para Honda Accord 2000:
         - Accord (4 Cil): <b>BAXA</b> (Automática Convencional, 4 Vel, FWD) - Motor 2.3L
         - Accord (V6): <b>B7XA</b> (Automática Convencional, 4 Vel, FWD) - Motor 3.0L"
