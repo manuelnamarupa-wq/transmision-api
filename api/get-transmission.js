@@ -63,12 +63,12 @@ export default async function handler(request, response) {
             if (!textParts.every(word => itemText.includes(word))) return false;
         }
         return true;
-    }).slice(0, 200); // <--- CAMBIO CRÍTICO: Aumentado a 200 para no perder datos en coches populares como Accord.
+    }).slice(0, 200); // Mantenemos 200 para encontrar MCTA y otras raras.
 
     const API_KEY = process.env.GEMINI_API_KEY;
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
-    // --- ESCENARIO 1: CORRECTOR ORTOGRÁFICO ---
+    // --- ESCENARIO 1: CORRECTOR (Sin cambios, funciona bien) ---
     if (candidates.length === 0) {
         const yearRegex = /\b(19|20)\d{2}\b/;
         const match = userQuery.match(yearRegex);
@@ -98,14 +98,12 @@ export default async function handler(request, response) {
             if (parsed.found && parsed.suggestion) {
                 let finalSuggestion = parsed.suggestion;
                 let replyText = "";
-
                 if (originalYear) {
                     const testQuery = `${finalSuggestion} ${originalYear}`.toLowerCase().split(' ');
                     const yearExists = transmissionData.some(item => {
                         const str = `${item.Make} ${item.Model} ${item.Years}`.toLowerCase();
                         return testQuery.every(word => str.includes(word));
                     });
-
                     if (yearExists) {
                         finalSuggestion = `${finalSuggestion} ${originalYear}`;
                         replyText = `¿Quisiste decir <b>${finalSuggestion}</b>?`;
@@ -124,42 +122,35 @@ export default async function handler(request, response) {
         }
     }
 
-    // --- ESCENARIO 2: BÚSQUEDA NORMAL (DESAGREGACIÓN ATÓMICA) ---
+    // --- ESCENARIO 2: BÚSQUEDA NORMAL (CORRECCIÓN DE FORMATO) ---
     const contextForAI = JSON.stringify(candidates);
 
     const prompt = `
-        [SYSTEM: STRICT RAW DATA OUTPUT. NO SUMMARIES.]
-        ROL: Base de datos cruda de transmisiones.
+        [SYSTEM: OUTPUT MUST BE PLAIN TEXT WITH HTML TAGS. DO NOT OUTPUT JSON.]
+        
+        ROL: Catálogo experto de transmisiones.
         DATOS (JSON):
         ---
         ${contextForAI}
         ---
         INPUT USUARIO: "${expandedQuery}"
 
-        REGLA DE ORO (DESAGREGACIÓN ATÓMICA):
-        1. UNA LÍNEA POR CÓDIGO: Si un coche tiene códigos "MAXA, BAXA", ESTÁ PROHIBIDO JUNTARLOS.
-           - Incorrecto: "Accord: MAXA, BAXA..."
-           - Correcto: 
-             "- Accord: <b>MAXA</b>..."
-             "- Accord: <b>BAXA</b>..."
-        2. MUESTRA TODO: Si hay 5 variantes en el JSON que coinciden con el año, quiero ver las 5 líneas. No omitas la "MCTA" solo porque es rara.
+        REGLAS DE FORMATO (OBLIGATORIO):
+        1. NO GENERES CÓDIGO JSON. Genera una lista legible para humanos.
+        2. Usa viñetas (guiones) para cada línea.
+        3. Pon el CÓDIGO de transmisión entre <b> y </b>.
         
-        REGLA DE MATEMÁTICA DE AÑOS:
-        1. Revisa el rango "Years" en el JSON (Ej: "98-02").
-        2. Si el año del usuario (2000) cae dentro, INCLÚYELO.
-        3. Si no cae, pon la nota: "(No disponible en [Año], ver rango [Rango])".
+        REGLAS DE CONTENIDO:
+        1. AGRUPACIÓN: Si la base de datos dice "MAXA, BAXA", puedes mostrarlas juntas.
+        2. EXHAUSTIVIDAD: Si hay otras variantes (como MCTA, B7XA) para el mismo año, DEBES generar líneas separadas para ellas. ¡No las omitas!
+        3. AÑOS: Si el año del usuario no coincide con el rango, pon: "(Año [Año] no disponible, ver rango)".
+        4. TECNOLOGÍA: Indica siempre (Automática Convencional / CVT / DSG).
 
-        REGLAS DE FORMATO:
-        1. Formato: <b>CODIGO</b> (sin asteriscos).
-        2. Tecnología OBLIGATORIA: (Automática Convencional), (CVT) o (DSG).
-        3. Muestra Motor y Tracción.
-
-        Ejemplo Esperado (Desagregado):
+        Ejemplo de Respuesta Correcta:
         "Resultados para Honda Accord 2000:
-        - Accord: <b>BAXA</b> (Automática Convencional, 4 Vel, FWD) - Motor 2.3L
-        - Accord: <b>MAXA</b> (Automática Convencional, 4 Vel, FWD) - Motor 2.3L
-        - Accord: <b>B7XA</b> (Automática Convencional, 4 Vel, FWD) - Motor 3.0L
-        - Accord: <b>MCTA</b> (Automática Convencional, 4 Vel, FWD) - Motor 2.3L (Versión Especial)"
+        - Accord (4 Cil): <b>MAXA, BAXA</b> (Automática Convencional, 4 Vel, FWD) - Motor 2.3L
+        - Accord (V6): <b>B7XA</b> (Automática Convencional, 4 Vel, FWD) - Motor 3.0L
+        - Accord (Especial): <b>MCTA</b> (Automática Convencional, 4 Vel, FWD) - Motor 2.3L"
     `;
 
     try {
@@ -179,8 +170,12 @@ export default async function handler(request, response) {
         }
 
         const data = await geminiResponse.json();
-        const textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "Sin respuesta clara.";
+        let textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "Sin respuesta clara.";
         
+        // --- LIMPIEZA DE EMERGENCIA ---
+        // Si la IA vuelve a mandar JSON o bloques de código, los eliminamos a la fuerza.
+        textResponse = textResponse.replace(/```json/g, '').replace(/```/g, '');
+
         let safeResponse = textResponse
             .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') 
             .replace(/\n/g, '<br>');
