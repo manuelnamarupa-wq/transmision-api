@@ -49,7 +49,7 @@ export default async function handler(request, response) {
     const lowerCaseQuery = expandedQuery.toLowerCase().trim();
     const queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 1);
 
-    // --- FILTRO HÍBRIDO (ESTRICTO EN NOMBRE, FLEXIBLE EN AÑO) ---
+    // --- FILTRO HÍBRIDO ---
     const textParts = queryParts.filter(part => isNaN(part)); 
     
     const candidates = transmissionData.filter(item => {
@@ -63,7 +63,7 @@ export default async function handler(request, response) {
 
         // Regla: Dejamos pasar los años para que la IA los analice
         return true;
-    }).slice(0, 20); // <--- AJUSTE DE VELOCIDAD SEGURO: Bajamos de 40 a 20 candidatos para que la IA lea menos.
+    }).slice(0, 15); // <--- OPTIMIZACIÓN MÁXIMA: Solo 15 candidatos. Esto acelerará mucho la respuesta.
 
     if (candidates.length === 0) {
         return response.status(200).json({ reply: `No se encontraron coincidencias para "${userQuery}". Verifica el nombre del modelo.` });
@@ -72,12 +72,12 @@ export default async function handler(request, response) {
     // 4. ANÁLISIS INTELIGENTE CON IA
     const API_KEY = process.env.GEMINI_API_KEY;
     
-    // --- RESTAURADO: USAMOS EL MODELO QUE SABEMOS QUE FUNCIONA ---
+    // --- MODELO ESTABLE (EL ÚNICO QUE FUNCIONA EN TU CUENTA) ---
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent?key=${API_KEY}`;
 
     const contextForAI = JSON.stringify(candidates);
 
-    // --- PROMPT COMPLETO (CON AZUL, NEGRITAS Y LÓGICA CHEROKEE) ---
+    // --- PROMPT COMPLETO ---
     const prompt = `
         ROL: Motor de búsqueda estricto de autopartes.
         DATOS DISPONIBLES (JSON):
