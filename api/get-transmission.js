@@ -61,45 +61,45 @@ export default async function handler(request, response) {
             if (!textParts.every(word => itemText.includes(word))) return false;
         }
         return true;
-    }).slice(0, 60); // <--- CAMBIO CRÍTICO: Aumentamos de 15 a 60 para que quepan TODAS las variantes.
+    }).slice(0, 80); // <--- LÍMITE AMPLIADO: 80 es suficiente para no perder datos, y Flash lo lee rápido.
 
     if (candidates.length === 0) {
         return response.status(200).json({ reply: `No se encontraron coincidencias para "${userQuery}".` });
     }
 
-    // 4. IA FLASH 2.0 (Motor Rápido)
+    // 4. IA FLASH 2.0 EXPERIMENTAL
     const API_KEY = process.env.GEMINI_API_KEY;
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
     const contextForAI = JSON.stringify(candidates);
 
+    // --- PROMPT GENERALIZADO (SIN REGLAS ESPECÍFICAS DE COCHES) ---
     const prompt = `
-        ROL: Ingeniero de producto de transmisiones.
-        DATOS DISPONIBLES (JSON):
+        ROL: Sistema experto de catálogo de autopartes.
+        DATOS (JSON):
         ---
         ${contextForAI}
         ---
         INPUT USUARIO: "${expandedQuery}"
 
-        INSTRUCCIONES DE VOLUMEN (CRÍTICO):
-        1. LISTADO EXHAUSTIVO: Si hay muchas variantes (Ej: Golf tiene Base, GTI, TDI, Sportwagen), MUESTRA TODAS.
-        2. NO RESUMAS: Prefiero una lista larga y completa a una lista corta incompleta.
-        3. Si hay duplicados exactos, agrúpalos, pero si cambia el Motor o la Tracción, sepáralos en otra línea.
+        REGLA LÓGICA DE NOMBRES (CRÍTICO):
+        1. NO AGRUPES MODELOS DISTINTOS:
+           - Si en la lista ves un nombre corto (Ej: "Golf" o "Focus") y uno largo (Ej: "Golf Sportwagen" o "Focus ST"), trátalos como vehículos separados.
+           - Genera una línea para el modelo base y otra para la variante.
+        2. NO RESUMAS: Si hay 5 opciones de motor diferentes para un mismo año, lista las 5.
 
         REGLAS DE FORMATO:
-        1. CÓDIGO TRANSMISIÓN: OBLIGATORIO entre <b> y </b>. (Ej: <b>09G</b>).
-        2. Si el modelo es "AVO" o "TBD", escribe "Modelo por confirmar" sin negritas.
+        1. IMPORTANTE: Usa etiquetas HTML <b>codigo</b>. NO uses asteriscos (**codigo**).
+        2. Si el código es "AVO" o "TBD", escribe "Modelo por confirmar" sin negritas.
 
         REGLAS TÉCNICAS:
-        1. MENCIONA SIEMPRE: Tracción (FWD/RWD/AWD) y Motor (1.8L, 2.0L, TDI, etc).
-        2. NO uses la palabra "Estándar".
-        3. CLASIFICA: (CVT), (DSG / Doble Embrague) o (Automática Convencional).
+        1. Filtra estrictamente por AÑO (revisa rangos 98-05).
+        2. Indica: Tracción (FWD/RWD/AWD) y Motor/Litros.
+        3. Tecnología: (CVT), (DSG / Doble Embrague) o (Automática Convencional).
 
-        Ejemplo de Respuesta Perfecta:
-        "Resultados para Volkswagen Golf 2015:
-        - <b>09G</b> (Automática Convencional, 6 Vel, FWD) - Motor 1.8L Turbo (Versión Hatchback/Sportwagen)
-        - <b>02E</b> (DSG / Doble Embrague, 6 Vel, FWD) - Motor 2.0L TDI (Diesel)
-        - <b>02E</b> (DSG / Doble Embrague, 6 Vel, FWD) - Motor 2.0L Turbo (GTI)"
+        Ejemplo de Salida Esperada:
+        "Resultados para [Auto] [Año]:
+        - [Nombre Modelo Exacto]: <b>[CODIGO]</b> ([Tipo], [Vel], [Tracción]) - Motor [Litros]"
     `;
 
     try {
@@ -123,7 +123,14 @@ export default async function handler(request, response) {
         const data = await geminiResponse.json();
         const textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "Sin respuesta clara.";
         
-        return response.status(200).json({ reply: textResponse });
+        // --- SEGURO ANTI-MARKDOWN ---
+        // Si la IA ignora la regla y manda asteriscos (**), esto los convierte a HTML (<b>) automáticamente.
+        // Esto garantiza que SIEMPRE se vea azul.
+        let safeResponse = textResponse
+            .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') 
+            .replace(/\n/g, '<br>');
+
+        return response.status(200).json({ reply: safeResponse });
 
     } catch (error) {
         console.error("Error backend:", error);
