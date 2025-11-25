@@ -49,7 +49,7 @@ export default async function handler(request, response) {
     const lowerCaseQuery = expandedQuery.toLowerCase().trim();
     const queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 1);
 
-    // --- FILTRO HÍBRIDO ---
+    // --- FILTRO HÍBRIDO (ESTRICTO EN NOMBRE, FLEXIBLE EN AÑO) ---
     const textParts = queryParts.filter(part => isNaN(part)); 
     
     const candidates = transmissionData.filter(item => {
@@ -63,7 +63,7 @@ export default async function handler(request, response) {
 
         // Regla: Dejamos pasar los años para que la IA los analice
         return true;
-    }).slice(0, 15); // <--- OPTIMIZACIÓN MÁXIMA: Solo 15 candidatos. Esto acelerará mucho la respuesta.
+    }).slice(0, 20); // Mantenemos la lista corta (20) para máxima velocidad
 
     if (candidates.length === 0) {
         return response.status(200).json({ reply: `No se encontraron coincidencias para "${userQuery}". Verifica el nombre del modelo.` });
@@ -72,12 +72,13 @@ export default async function handler(request, response) {
     // 4. ANÁLISIS INTELIGENTE CON IA
     const API_KEY = process.env.GEMINI_API_KEY;
     
-    // --- MODELO ESTABLE (EL ÚNICO QUE FUNCIONA EN TU CUENTA) ---
-    const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${API_KEY}`;
+    // --- CAMBIO DE MODELO: USAMOS EL MÁS RÁPIDO DE TU LISTA ---
+    // gemini-2.5-flash: Velocidad extrema, ideal para tu plan.
+    const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${API_KEY}`;
 
     const contextForAI = JSON.stringify(candidates);
 
-    // --- PROMPT COMPLETO ---
+    // --- PROMPT COMPLETO (MANTENIDO EXACTAMENTE IGUAL) ---
     const prompt = `
         ROL: Motor de búsqueda estricto de autopartes.
         DATOS DISPONIBLES (JSON):
