@@ -2,6 +2,7 @@ const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmisio
 
 // Cache en memoria
 let transmissionData = [];
+let uniqueModelsStr = ""; // Lista de modelos únicos para el corrector
 let dataLoaded = false;
 let lastLoadTime = 0;
 
@@ -13,6 +14,13 @@ async function loadData() {
             const response = await fetch(DATA_URL);
             if (!response.ok) throw new Error('Error GitHub Raw.');
             transmissionData = await response.json();
+            
+            // --- PRE-PROCESO PARA EL CORRECTOR ---
+            // Creamos una lista de texto con todos los modelos únicos (Ej: "Honda Accord, VW Jetta, Jeep Liberty...")
+            // Esto se lo pasaremos a la IA solo cuando no encuentre nada.
+            const modelSet = new Set(transmissionData.map(item => `${item.Make} ${item.Model}`));
+            uniqueModelsStr = Array.from(modelSet).join(", ");
+
             dataLoaded = true;
             lastLoadTime = now;
             console.log(`BD Actualizada: ${transmissionData.length} registros.`);
@@ -52,7 +60,6 @@ export default async function handler(request, response) {
     const lowerCaseQuery = expandedQuery.toLowerCase().trim();
     let queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 0);
 
-    // Palabras a ignorar en el filtro estricto (para que la IA las procese después)
     const stopWords = ['cambios', 'cambio', 'velocidades', 'velocidad', 'vel', 'marchas', 'transmision', 'caja', 'automatico', 'automatica'];
     const activeSearchTerms = queryParts.filter(part => !stopWords.includes(part));
 
@@ -61,25 +68,57 @@ export default async function handler(request, response) {
     
     const candidates = transmissionData.filter(item => {
         const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
-        
-        // Regla: Debe contener las palabras clave (Ej: "Accord")
         if (textParts.length > 0) {
             if (!textParts.every(word => itemText.includes(word))) return false;
         }
         return true;
-    }).slice(0, 80); // Límite amplio para no perder variantes raras
+    }).slice(0, 80);
 
-    if (candidates.length === 0) {
-        return response.status(200).json({ reply: `No se encontraron coincidencias para "${userQuery}".` });
-    }
-
-    // 4. IA FLASH 2.0
     const API_KEY = process.env.GEMINI_API_KEY;
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
+    // --- ESCENARIO 1: NO HAY RESULTADOS (CORRECTOR DE ERRORES) ---
+    if (candidates.length === 0) {
+        // En lugar de dar error, llamamos a la IA para que sugiera una corrección
+        // usando la lista 'uniqueModelsStr' que preparamos al inicio.
+        
+        const correctionPrompt = `
+            ACTÚA COMO: Corrector ortográfico de vehículos.
+            LISTA VÁLIDA DE VEHÍCULOS EN BD: [${uniqueModelsStr}]
+            BÚSQUEDA DEL USUARIO: "${userQuery}"
+
+            TAREA:
+            1. Compara la búsqueda del usuario con la LISTA VÁLIDA.
+            2. Si hay un error ortográfico obvio (Ej: "Liberti" vs "Liberty", "Jeta" vs "Jetta", "Cheyene" vs "Cheyenne"), sugiere el correcto.
+            3. Intenta preservar el AÑO si el usuario lo escribió.
+
+            SALIDA (Solo una de estas dos opciones):
+            - Opción A (Si encontraste corrección): "¿Quisiste decir <b>[Nombre Correcto] [Año]</b>?"
+            - Opción B (Si no se parece a nada): "No se encontraron coincidencias para ${userQuery}. Verifica el nombre."
+        `;
+
+        try {
+            const geminiResponse = await fetch(GEMINI_API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ contents: [{ parts: [{ text: correctionPrompt }] }] }),
+            });
+
+            if (!geminiResponse.ok) throw new Error("Error IA Corrector");
+            const data = await geminiResponse.json();
+            const suggestion = data.candidates?.[0]?.content?.parts?.[0]?.text || `No se encontraron resultados para "${userQuery}".`;
+            
+            return response.status(200).json({ reply: suggestion });
+
+        } catch (error) {
+            // Si falla el corrector, damos el mensaje estándar
+            return response.status(200).json({ reply: `No se encontraron coincidencias para "${userQuery}".` });
+        }
+    }
+
+    // --- ESCENARIO 2: SÍ HAY RESULTADOS (FLUJO NORMAL) ---
     const contextForAI = JSON.stringify(candidates);
 
-    // --- PROMPT DE DESAGREGACIÓN TOTAL ---
     const prompt = `
         ROL: Catálogo experto de transmisiones.
         DATOS (JSON):
@@ -88,22 +127,16 @@ export default async function handler(request, response) {
         ---
         INPUT USUARIO: "${expandedQuery}"
 
-        REGLA DE ORO (DESAGREGACIÓN):
-        1. MUESTRA TODO: Si un mismo vehículo (Ej: Accord 2000) aparece en el JSON con 3 códigos diferentes (Ej: BAXA, B7XA, MCTA), DEBES GENERAR 3 LÍNEAS DISTINTAS.
-        2. NO AGRUPES NI RESUMAS: No decidas por el usuario cuál es la "común". Muestra todas las opciones que coincidan con el año.
-        3. DIFERENCIA: Si puedes, indica qué diferencia hay (Motor 2.3L vs 3.0L, o "Versión Híbrida/Especial").
+        REGLAS DE NEGOCIO:
+        1. MUESTRA TODO: Si hay códigos distintos (Ej: BAXA, B7XA), genera líneas distintas.
+        2. Búsqueda amplia: Si buscan "Cherokee", incluye "Grand Cherokee".
+        3. Formato: <b>CODIGO</b> (sin asteriscos). "AVO"/"TBD" = "Modelo por confirmar".
+        4. Desglose: Muestra Motor y Tracción.
 
-        OTRAS REGLAS:
-        1. Búsqueda amplia: Si buscan "Cherokee", incluye "Grand Cherokee".
-        2. Velocidades: Si piden "5 cambios", prioriza esas pero muestra las demás con una nota.
-        3. Formato: <b>CODIGO</b> (sin asteriscos).
-        4. "AVO"/"TBD" = "Modelo por confirmar".
-
-        Ejemplo Esperado (Desagregado):
+        Ejemplo Esperado:
         "Resultados para Honda Accord 2000:
-        - Accord (4 Cil): <b>BAXA / MAXA</b> (Automática Convencional, 4 Vel, FWD) - Motor 2.3L
-        - Accord (V6): <b>B7XA</b> (Automática Convencional, 4 Vel, FWD) - Motor 3.0L
-        - Accord (Versión Especial): <b>MCTA</b> (Automática Convencional, 5 Vel, FWD) - Motor 2.3L"
+        - Accord (4 Cil): <b>BAXA</b> (Automática Convencional, 4 Vel, FWD) - Motor 2.3L
+        - Accord (V6): <b>B7XA</b> (Automática Convencional, 4 Vel, FWD) - Motor 3.0L"
     `;
 
     try {
@@ -127,7 +160,6 @@ export default async function handler(request, response) {
         const data = await geminiResponse.json();
         const textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "Sin respuesta clara.";
         
-        // --- SEGURO ANTI-MARKDOWN ---
         let safeResponse = textResponse
             .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') 
             .replace(/\n/g, '<br>');
