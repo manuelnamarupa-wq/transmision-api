@@ -64,37 +64,33 @@ export default async function handler(request, response) {
 
     const contextForAI = JSON.stringify(candidates);
 
-    // --- PROMPT CON LIMPIEZA DE "AVO/TBD" ---
+    // --- PROMPT DETALLADO (VERSIONES + TRACCIÓN) ---
     const prompt = `
-        ROL INTERNO: Ingeniero experto en transmisiones automáticas.
-        OBJETIVO: Identificar la transmisión exacta para el vehículo del cliente.
-        DATOS (JSON):
+        ROL: Sistema experto en identificación de transmisiones.
+        DATOS DISPONIBLES (JSON):
         ---
         ${contextForAI}
         ---
         INPUT USUARIO: "${expandedQuery}"
 
         INSTRUCCIONES DE RESPUESTA (ESTRICTAS):
-        1. SILENCIO DE ROL: NO menciones "soy un experto", "basado en la información" ni "hola".
-        2. INICIO DIRECTO: Empieza con: "Para [Vehículo] [Año]:".
-        3. FORMATO: Usa una lista con viñetas clara.
+        1. SILENCIO DE ROL: Empieza directo con "Para [Vehículo] [Año]:".
+        2. NO uses la palabra "Estándar".
+        3. SI MODELO ES "AVO" o "TBD": Escribe "Modelo por confirmar" sin negritas.
 
-        REGLAS DE LIMPIEZA DE DATOS (CRÍTICO):
-        1. Si el "Trans Model" es "AVO", "TBD" o "N/A": NO lo pongas en negritas. Escribe "Modelo por confirmar / Varias opciones".
-        2. NO inventes códigos si dicen AVO.
+        REGLAS DE DETALLE (CRÍTICO):
+        1. VERSIONES: Si el JSON menciona variantes (Ej: GTI, Sportwagen, GLI, Coupe), MENCIONÁLAS explícitamente para diferenciar.
+        2. TRACCIÓN: Indica SIEMPRE si es Tracción Delantera (FWD), Trasera (RWD) o 4x4 (AWD/4WD).
+        3. TECNOLOGÍA: Clasifica si es (CVT), (DSG / Doble Embrague) o (Automática Convencional).
 
-        REGLAS TÉCNICAS:
-        1. NUNCA uses la palabra "Estándar". Solo "Automática".
-        2. CLASIFICACIÓN OBLIGATORIA: Debes indicar el tipo exacto:
-           - "(Automática Convencional)"
-           - "(CVT)"
-           - "(DSG / Doble Embrague)"
-        3. HTML: Pon el CÓDIGO/MODELO (si es válido) entre <b> y </b>.
-        
-        Ejemplo de Salida Deseada:
-        "Para Nissan Sentra 2010:
-        - <b>JF011E</b> (CVT) - Motor 2.5L
-        - Modelo por confirmar (AVO) - Motor 2.0L (Requiere revisión física)"
+        FORMATO VISUAL:
+        "Para [Vehículo] [Año]:
+        - <b>[Modelo Trans]</b> ([Tecnología], [Velocidades], [Tracción]) - [Motor/Versión]"
+
+        Ejemplo Ideal:
+        "Para Volkswagen Golf 2015:
+        - <b>09G</b> (Automática Convencional, 6 Vel, FWD) - Versión Base / Hatchback 1.8L
+        - <b>02E</b> (DSG / Doble Embrague, 6 Vel, FWD) - Versión GTI / Sportwagen 2.0L"
     `;
 
     try {
