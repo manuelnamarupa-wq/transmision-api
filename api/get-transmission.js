@@ -49,19 +49,19 @@ export default async function handler(request, response) {
     const lowerCaseQuery = expandedQuery.toLowerCase().trim();
     const queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 1);
 
-    // --- FILTRO HÍBRIDO (ESTRICTO EN NOMBRE, FLEXIBLE EN AÑO) ---
+    // --- FILTRO HÍBRIDO (ESTRICTO NOMBRE, FLEXIBLE AÑO) ---
     const textParts = queryParts.filter(part => isNaN(part)); 
     
     const candidates = transmissionData.filter(item => {
         const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
         
-        // Regla 1: Debe contener las palabras escritas (Ej: Cherokee)
+        // Regla: Debe contener las palabras escritas (Ej: Cherokee)
         if (textParts.length > 0) {
             const matchesWords = textParts.every(word => itemText.includes(word));
             if (!matchesWords) return false;
         }
 
-        // Regla 2: Dejamos pasar los años para que la IA los analice (matemáticas de rangos)
+        // Regla: Dejamos pasar los años para que la IA los analice
         return true;
     }).slice(0, 40);
 
@@ -71,11 +71,14 @@ export default async function handler(request, response) {
 
     // 4. ANÁLISIS INTELIGENTE CON IA
     const API_KEY = process.env.GEMINI_API_KEY;
-    const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent?key=${API_KEY}`;
+    
+    // --- CAMBIO CRÍTICO DE VELOCIDAD ---
+    // Usamos 'gemini-1.5-flash'. Esta URL está verificada y no dará error 404.
+    const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`;
 
     const contextForAI = JSON.stringify(candidates);
 
-    // --- PROMPT CON FORMATO VISUAL RESTAURADO ---
+    // --- PROMPT ROBUSTO (MANTENIDO IGUAL) ---
     const prompt = `
         ROL: Motor de búsqueda estricto de autopartes.
         DATOS DISPONIBLES (JSON):
@@ -85,7 +88,7 @@ export default async function handler(request, response) {
         INPUT USUARIO: "${expandedQuery}"
 
         REGLAS DE FORMATO (IMPORTANTE):
-        1. CÓDIGO TRANSMISIÓN: Debe ir OBLIGATORIAMENTE entre etiquetas <b> y </b>. (Ejemplo: <b>6F35</b>). Esto activa el color azul.
+        1. CÓDIGO TRANSMISIÓN: Debe ir OBLIGATORIAMENTE entre etiquetas <b> y </b>. (Ejemplo: <b>6F35</b>).
         2. Si el modelo es "AVO" o "TBD", NO uses negritas.
 
         REGLAS DE LÓGICA:
