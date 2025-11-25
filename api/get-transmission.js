@@ -63,22 +63,22 @@ export default async function handler(request, response) {
             if (!textParts.every(word => itemText.includes(word))) return false;
         }
         return true;
-    }).slice(0, 80);
+    }).slice(0, 200); // <--- CAMBIO CRÍTICO: Aumentado a 200 para no perder datos en coches populares como Accord.
 
     const API_KEY = process.env.GEMINI_API_KEY;
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
-    // --- ESCENARIO 1: CORRECTOR (Si no hubo coincidencias de texto) ---
+    // --- ESCENARIO 1: CORRECTOR ORTOGRÁFICO ---
     if (candidates.length === 0) {
         const yearRegex = /\b(19|20)\d{2}\b/;
         const match = userQuery.match(yearRegex);
         const originalYear = match ? match[0] : null;
 
         const correctionPrompt = `
-            ACTÚA COMO: API JSON de corrección ortográfica.
+            ACTÚA COMO: API JSON de corrección.
             LISTA VÁLIDA: [${uniqueModelsStr}]
             BÚSQUEDA USUARIO: "${userQuery}"
-            TAREA: Encuentra el NOMBRE del vehículo más parecido (ignora el año).
+            TAREA: Encuentra el NOMBRE del vehículo válido más parecido.
             FORMATO JSON: { "found": true, "suggestion": "Jeep Liberty" } o { "found": false }
         `;
 
@@ -91,7 +91,6 @@ export default async function handler(request, response) {
 
             if (!geminiResponse.ok) throw new Error("Error IA");
             const data = await geminiResponse.json();
-            
             let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
             rawText = rawText.replace(/```json|```/g, '').trim();
             const parsed = JSON.parse(rawText);
@@ -111,13 +110,11 @@ export default async function handler(request, response) {
                         finalSuggestion = `${finalSuggestion} ${originalYear}`;
                         replyText = `¿Quisiste decir <b>${finalSuggestion}</b>?`;
                     } else {
-                        // Si no existe el año, sugerimos buscar el modelo SIN año para ver todas las opciones
-                        replyText = `No encontré el año ${originalYear}. ¿Quisiste decir <b>${finalSuggestion}</b> (Ver todos los años)?`;
+                        replyText = `El modelo existe, pero no encontré año ${originalYear}. ¿Quisiste decir <b>${finalSuggestion}</b> (Ver todos los años)?`;
                     }
                 } else {
                     replyText = `¿Quisiste decir <b>${finalSuggestion}</b>?`;
                 }
-
                 return response.status(200).json({ reply: replyText, suggestion: finalSuggestion });
             } else {
                 return response.status(200).json({ reply: `No se encontraron coincidencias para "${userQuery}".` });
@@ -127,43 +124,42 @@ export default async function handler(request, response) {
         }
     }
 
-    // --- ESCENARIO 2: BÚSQUEDA NORMAL (PROMPT CORREGIDO) ---
+    // --- ESCENARIO 2: BÚSQUEDA NORMAL (DESAGREGACIÓN ATÓMICA) ---
     const contextForAI = JSON.stringify(candidates);
 
     const prompt = `
-        [SYSTEM INSTRUCTION: STRICT OUTPUT ONLY. NO CONVERSATIONAL FILLER.]
-        [RULE: Do NOT say "Okay", "Entendido", "Aquí tienes". Start directly with the results.]
-
-        ROL: Catálogo experto de transmisiones.
+        [SYSTEM: STRICT RAW DATA OUTPUT. NO SUMMARIES.]
+        ROL: Base de datos cruda de transmisiones.
         DATOS (JSON):
         ---
         ${contextForAI}
         ---
         INPUT USUARIO: "${expandedQuery}"
 
-        REGLA DE MANEJO DE AÑOS (CRÍTICO - "OPCIONES CERCANAS"):
-        1. Si el usuario pide un año (Ej: 2000) y el vehículo SÍ está en la lista pero en otro rango (Ej: 2002-2007):
-           - ¡NO LO OCULTES!
-           - Muestra el vehículo disponible más cercano.
-           - Agrega la nota: "(Año [AñoUsuario] no disponible, mostrando [RangoReal])".
-           - NO digas "Modelo por confirmar".
-
-        REGLA DE TECNOLOGÍA (OBLIGATORIO):
-        En CADA línea, clasifica explícitamente:
-        - (Automática Convencional)
-        - (CVT)
-        - (DSG / Doble Embrague)
+        REGLA DE ORO (DESAGREGACIÓN ATÓMICA):
+        1. UNA LÍNEA POR CÓDIGO: Si un coche tiene códigos "MAXA, BAXA", ESTÁ PROHIBIDO JUNTARLOS.
+           - Incorrecto: "Accord: MAXA, BAXA..."
+           - Correcto: 
+             "- Accord: <b>MAXA</b>..."
+             "- Accord: <b>BAXA</b>..."
+        2. MUESTRA TODO: Si hay 5 variantes en el JSON que coinciden con el año, quiero ver las 5 líneas. No omitas la "MCTA" solo porque es rara.
+        
+        REGLA DE MATEMÁTICA DE AÑOS:
+        1. Revisa el rango "Years" en el JSON (Ej: "98-02").
+        2. Si el año del usuario (2000) cae dentro, INCLÚYELO.
+        3. Si no cae, pon la nota: "(No disponible en [Año], ver rango [Rango])".
 
         REGLAS DE FORMATO:
-        1. Formato: <b>CODIGO</b> (sin asteriscos). 
-        2. "AVO"/"TBD" = "Modelo por confirmar".
-        3. Desglose: Muestra Motor y Tracción (FWD/RWD).
-        4. Inclusión: Si buscan "Cherokee", muestra "Grand Cherokee" también.
+        1. Formato: <b>CODIGO</b> (sin asteriscos).
+        2. Tecnología OBLIGATORIA: (Automática Convencional), (CVT) o (DSG).
+        3. Muestra Motor y Tracción.
 
-        Ejemplo de Respuesta Perfecta:
-        "Resultados para Jeep Liberty 2000:
-        - Jeep Liberty: <b>42RLE</b> (Automática Convencional, 4 Vel, RWD) - Motor 3.7L (Año 2000 no disponible, mostrando 2002-2007).
-        - Jeep Cherokee: <b>AW4</b> (Automática Convencional, 4 Vel, RWD) - Motor 4.0L"
+        Ejemplo Esperado (Desagregado):
+        "Resultados para Honda Accord 2000:
+        - Accord: <b>BAXA</b> (Automática Convencional, 4 Vel, FWD) - Motor 2.3L
+        - Accord: <b>MAXA</b> (Automática Convencional, 4 Vel, FWD) - Motor 2.3L
+        - Accord: <b>B7XA</b> (Automática Convencional, 4 Vel, FWD) - Motor 3.0L
+        - Accord: <b>MCTA</b> (Automática Convencional, 4 Vel, FWD) - Motor 2.3L (Versión Especial)"
     `;
 
     try {
