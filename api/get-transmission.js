@@ -77,6 +77,7 @@ export default async function handler(request, response) {
     let candidates = [];
     let searchMode = ""; 
 
+    // NIVEL A: Exacto
     if (userYear) {
         candidates = transmissionData.filter(item => {
             const itemText = `${item.Make} ${item.Model} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
@@ -85,6 +86,7 @@ export default async function handler(request, response) {
         if (candidates.length > 0) searchMode = "EXACT_YEAR";
     }
 
+    // NIVEL B: General
     if (candidates.length === 0) {
         candidates = transmissionData.filter(item => {
             const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
@@ -93,18 +95,19 @@ export default async function handler(request, response) {
         if (candidates.length > 0) searchMode = "ALL_YEARS";
     }
 
+    // NIVEL C: Corrector
     if (candidates.length === 0) searchMode = "SPELL_CHECK";
 
     const API_KEY = process.env.GEMINI_API_KEY;
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
-    // --- CORRECTOR ---
+    // --- 1. CORRECTOR ---
     if (searchMode === "SPELL_CHECK") {
         const correctionPrompt = `
             ACTÚA COMO: API JSON de corrección.
             LISTA VÁLIDA: [${uniqueModelsStr}]
             BÚSQUEDA USUARIO: "${textQuery}"
-            TAREA: Encuentra el nombre más parecido.
+            TAREA: Encuentra el nombre más parecido (ignora años).
             FORMATO JSON: { "found": true, "suggestion": "Jeep Liberty" }
         `;
         try {
@@ -136,10 +139,19 @@ export default async function handler(request, response) {
         } catch (e) { return response.status(200).json({ reply: "Sin resultados." }); }
     }
 
-    // --- BÚSQUEDA NORMAL ---
+    // --- 2. BÚSQUEDA NORMAL ---
     const finalCandidates = candidates.slice(0, 200);
     const contextForAI = JSON.stringify(finalCandidates);
     let prompt = "";
+
+    // Prompt Base
+    const baseRules = `
+        REGLAS DE NEGOCIO:
+        1. MUESTRA TODO: Si hay códigos distintos (MCTA, BAXA), genera líneas separadas.
+        2. SI EL CÓDIGO ES "AVO" O "TBD": Escribe "Por Definir".
+        3. FORMATO: <b>CODIGO</b>.
+        4. TECNOLOGÍA: Indica (CVT / DSG / Automática Convencional).
+    `;
 
     if (searchMode === "EXACT_YEAR") {
         prompt = `
@@ -148,10 +160,9 @@ export default async function handler(request, response) {
             ---
             ${contextForAI}
             ---
-            REGLAS:
-            1. Genera UNA LÍNEA por cada código. NO AGRUPES.
-            2. Formato: [Modelo]: <b>[CODIGO]</b> ([Tipo], [Vel], [Tracción]) - [Motor]
-            3. Clasifica tecnología (CVT/DSG/Convencional).
+            ${baseRules}
+            CONTEXTO: Datos ya filtrados para el año ${userYear}.
+            Formato: [Modelo]: <b>[CODIGO]</b> ([Tipo], [Vel], [Tracción]) - [Motor]
         `;
     } else { 
         prompt = `
@@ -161,13 +172,12 @@ export default async function handler(request, response) {
             ---
             ${contextForAI}
             ---
+            ${baseRules}
             REGLAS VISUALES (CRÍTICO):
-            1. ¡SOLO pon en negritas <b> el CÓDIGO!
+            1. ¡SOLO pon en negritas <b> el CÓDIGO! (Ej: <b>42RLE</b>).
             2. PROHIBIDO poner en negritas el nombre del auto.
             
-            OTRAS REGLAS:
-            1. Si el usuario pidió año ${userYear || "N/A"} y no está, pon nota: "No encontré año ${userYear}, mostrando cercanos:".
-            2. Clasifica tecnología (CVT/DSG/Convencional).
+            Nota de Año: Si el usuario pidió año ${userYear || "N/A"} y no está, pon nota: "No encontré año ${userYear}, mostrando cercanos:".
         `;
     }
 
@@ -184,48 +194,39 @@ export default async function handler(request, response) {
         const data = await geminiResponse.json();
         let textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "Sin datos.";
         
-        // --- ESCUDO ANTI-JSON ---
-        // Intentamos detectar si la IA mandó JSON y lo convertimos a HTML
+        // --- ESCUDO ANTI-JSON (Recuperación) ---
         try {
             const jsonMatch = textResponse.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
             if (jsonMatch) {
                 const possibleJson = JSON.parse(jsonMatch[0]);
-                
-                // Si logramos parsearlo, significa que la IA falló y mandó JSON. 
-                // Lo reconstruimos manualmente.
                 let rebuiltHtml = "";
                 let items = Array.isArray(possibleJson) ? possibleJson : (possibleJson.resultados || possibleJson.results || []);
-                
-                // Si es un objeto suelto y no un array, lo metemos en un array
                 if (!Array.isArray(items) && typeof items === 'object') items = [items];
 
                 if (Array.isArray(items) && items.length > 0) {
                     items.forEach(item => {
-                        // Buscamos las llaves sin importar si están en inglés o español
-                        const modelo = item.modelo || item.model || item.vehicle || "Vehículo";
-                        const codigo = item.codigo || item.code || item.trans || "???";
-                        const tech = item.tecnologia || item.technology || item.type || "";
-                        const specs = item.motor || item.engine || item.specs || "";
+                        const modelo = item.modelo || item.model || "Vehículo";
+                        const codigo = item.codigo || item.code || "???";
+                        const tech = item.tecnologia || item.technology || "";
+                        const specs = item.motor || item.engine || "";
                         const traccion = item.traccion || item.drive || "";
-                        
                         rebuiltHtml += `- ${modelo}: <b>${codigo}</b> (${tech}, ${traccion}) - ${specs}<br>`;
                     });
-                    
-                    // Agregamos nota si existe
                     if (possibleJson.nota) rebuiltHtml = `<p><i>${possibleJson.nota}</i></p>` + rebuiltHtml;
-                    
-                    textResponse = rebuiltHtml; // Reemplazamos el JSON feo por nuestro HTML bonito
+                    textResponse = rebuiltHtml;
                 }
             }
-        } catch (e) {
-            // Si falla el parseo, significa que era texto normal o JSON malformado.
-            // Simplemente limpiamos las etiquetas de código y seguimos.
-            textResponse = textResponse.replace(/```json/g, '').replace(/```/g, '');
-        }
+        } catch (e) {}
 
-        // Limpieza final de formato
+        // --- LIMPIEZA FINAL (AQUÍ ESTÁ LA SOLUCIÓN AVO) ---
+        textResponse = textResponse.replace(/```json/g, '').replace(/```/g, '');
+        
         let safeResponse = textResponse
-            .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') // Markdown a HTML
+            // 1. Corrección de AVO/TBD (Si viene en negritas o normal)
+            .replace(/<b>\s*(AVO|TBD|N\/A)\s*<\/b>/gi, 'Por Definir') 
+            .replace(/\b(AVO|TBD)\b/g, 'Por Definir')
+            // 2. Corrección de Markdown a HTML (Negritas azules)
+            .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') 
             .replace(/\n/g, '<br>');
 
         return response.status(200).json({ reply: safeResponse });
