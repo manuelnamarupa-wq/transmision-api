@@ -5,12 +5,13 @@ let uniqueModelsStr = "";
 let dataLoaded = false;
 let lastLoadTime = 0;
 
-// --- MOTOR MATEMÁTICO DE AÑOS ---
+// --- MOTOR MATEMÁTICO ---
 function isYearInRange(rangeStr, targetYearStr) {
     if (!rangeStr || !targetYearStr) return false;
     const target = parseInt(targetYearStr, 10);
     let cleanRange = rangeStr.replace(/\s/g, '').toUpperCase();
     
+    // Rango "98-02"
     if (cleanRange.includes('-') && !cleanRange.includes('UP')) {
         const parts = cleanRange.split('-');
         let start = parseInt(parts[0], 10);
@@ -19,11 +20,13 @@ function isYearInRange(rangeStr, targetYearStr) {
         if (end < 100) end += (end > 50 ? 1900 : 2000);
         return target >= start && target <= end;
     }
+    // Rango "99-UP"
     if (cleanRange.includes('UP') || cleanRange.includes('+')) {
         let start = parseInt(cleanRange.replace('UP','').replace('+','').replace('-',''), 10);
         if (start < 100) start += (start > 50 ? 1900 : 2000);
         return target >= start;
     }
+    // Año único
     let single = parseInt(cleanRange, 10);
     if (single < 100) single += (single > 50 ? 1900 : 2000);
     return target === single;
@@ -64,16 +67,29 @@ export default async function handler(request, response) {
     const userQuery = request.body.query;
     if (!userQuery) return response.status(400).json({ reply: "Ingresa un vehículo." });
     
+    // --- PASO 1: EXPANSIÓN DE AÑOS (CRÍTICO: MOVIDO AL INICIO) ---
+    // Convertimos "Accord 96" -> "Accord 1996" ANTES de analizar nada más.
+    const expandedQuery = userQuery.replace(/\b(\d{2})\b/g, (match) => {
+        const n = parseInt(match, 10);
+        // Lógica de corte: 80-99 son 19xx, 00-30 son 20xx
+        if (n >= 80 && n <= 99) return `19${match}`;
+        if (n >= 0 && n <= 30) return `20${match}`;
+        return match;
+    });
+
+    // --- PASO 2: DETECCIÓN DE AÑO (Usando ya el texto expandido) ---
     const yearRegex = /\b(19|20)\d{2}\b/;
-    const yearMatch = userQuery.match(yearRegex);
+    const yearMatch = expandedQuery.match(yearRegex); // <--- AHORA SÍ ENCUENTRA 1996
     const userYear = yearMatch ? yearMatch[0] : null;
 
-    let textQuery = userQuery;
+    // --- PASO 3: LIMPIEZA DE TEXTO ---
+    let textQuery = expandedQuery;
     if (userYear) textQuery = textQuery.replace(userYear, '').trim();
     
     const stopWords = ['cambios', 'cambio', 'velocidades', 'velocidad', 'vel', 'marchas', 'transmision', 'caja', 'automatico', 'automatica'];
     let queryParts = textQuery.toLowerCase().split(' ').filter(part => part.length > 0 && !stopWords.includes(part));
 
+    // --- ESTRATEGIA ---
     let candidates = [];
     let searchMode = ""; 
 
@@ -101,7 +117,7 @@ export default async function handler(request, response) {
     const API_KEY = process.env.GEMINI_API_KEY;
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
-    // --- 1. CORRECTOR ---
+    // 1. CORRECTOR
     if (searchMode === "SPELL_CHECK") {
         const correctionPrompt = `
             ACTÚA COMO: API JSON de corrección.
@@ -139,15 +155,15 @@ export default async function handler(request, response) {
         } catch (e) { return response.status(200).json({ reply: "Sin resultados." }); }
     }
 
-    // --- 2. BÚSQUEDA NORMAL ---
+    // 2. BÚSQUEDA NORMAL
     const finalCandidates = candidates.slice(0, 200);
     const contextForAI = JSON.stringify(finalCandidates);
     let prompt = "";
 
-    // Prompt Base
+    // Reglas Base
     const baseRules = `
         REGLAS DE NEGOCIO:
-        1. MUESTRA TODO: Si hay códigos distintos (MCTA, BAXA), genera líneas separadas.
+        1. MUESTRA TODO: Desagrega códigos.
         2. SI EL CÓDIGO ES "AVO" O "TBD": Escribe "Por Definir".
         3. FORMATO: <b>CODIGO</b>.
         4. TECNOLOGÍA: Indica (CVT / DSG / Automática Convencional).
@@ -174,7 +190,7 @@ export default async function handler(request, response) {
             ---
             ${baseRules}
             REGLAS VISUALES (CRÍTICO):
-            1. ¡SOLO pon en negritas <b> el CÓDIGO! (Ej: <b>42RLE</b>).
+            1. ¡SOLO pon en negritas <b> el CÓDIGO!
             2. PROHIBIDO poner en negritas el nombre del auto.
             
             Nota de Año: Si el usuario pidió año ${userYear || "N/A"} y no está, pon nota: "No encontré año ${userYear}, mostrando cercanos:".
@@ -194,7 +210,7 @@ export default async function handler(request, response) {
         const data = await geminiResponse.json();
         let textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "Sin datos.";
         
-        // --- ESCUDO ANTI-JSON (Recuperación) ---
+        // --- ESCUDO ANTI-JSON ---
         try {
             const jsonMatch = textResponse.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
             if (jsonMatch) {
@@ -218,14 +234,12 @@ export default async function handler(request, response) {
             }
         } catch (e) {}
 
-        // --- LIMPIEZA FINAL (AQUÍ ESTÁ LA SOLUCIÓN AVO) ---
+        // --- LIMPIEZA FINAL ---
         textResponse = textResponse.replace(/```json/g, '').replace(/```/g, '');
         
         let safeResponse = textResponse
-            // 1. Corrección de AVO/TBD (Si viene en negritas o normal)
             .replace(/<b>\s*(AVO|TBD|N\/A)\s*<\/b>/gi, 'Por Definir') 
             .replace(/\b(AVO|TBD)\b/g, 'Por Definir')
-            // 2. Corrección de Markdown a HTML (Negritas azules)
             .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') 
             .replace(/\n/g, '<br>');
 
