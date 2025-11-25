@@ -39,7 +39,7 @@ export default async function handler(request, response) {
     }
     
     // 3. Lógica de 2 Dígitos y Filtro Rápido
-    // Convierte "04" -> "2004", "98" -> "1998"
+    // Convierte "04" -> "2004", "98" -> "1998" para la búsqueda
     const expandedQuery = userQuery.replace(/\b(\d{2})\b/g, (match) => {
         const n = parseInt(match, 10);
         if (n >= 80 && n <= 99) return `19${match}`;
@@ -66,33 +66,34 @@ export default async function handler(request, response) {
 
     const contextForAI = JSON.stringify(candidates);
 
-    // --- PROMPT DE NEGOCIO ---
+    // --- PROMPT DE EXPERTO SILENCIOSO ---
     const prompt = `
-        Actúa como un experto en transmisiones automáticas.
-        DATOS DISPONIBLES (JSON):
+        ROL INTERNO: Ingeniero experto en transmisiones automáticas.
+        OBJETIVO: Identificar la transmisión exacta para el vehículo del cliente.
+        DATOS (JSON):
         ---
         ${contextForAI}
         ---
-        USUARIO BUSCA: "${expandedQuery}" (Original: "${userQuery}")
+        INPUT USUARIO: "${expandedQuery}"
 
-        REGLAS DE NEGOCIO (ESTRICTAS):
-        1. PROHIBIDO usar la palabra "Estándar" o "Standard". En este contexto eso significa transmisión manual y aquí SOLO vendemos automáticas.
-        2. Si te refieres al modelo normal (no sport, no turbo), llámalo "Versión Base" o solo por su nombre (Ej: "Golf" a secas).
-        3. Clasifica la tecnología de la transmisión explícitamente:
-           - Si es CVT, indícalo: "(Tipo: CVT)".
-           - Si es DSG / DCT / Doble Embrague, indícalo: "(Tipo: DSG / Doble Embrague)".
-           - Si es convencional (convertidor de par), indícalo: "(Tipo: Automática Convencional)".
+        INSTRUCCIONES DE RESPUESTA (ESTRICTAS):
+        1. SILENCIO DE ROL: NO menciones "soy un experto", "basado en la información" ni "hola".
+        2. INICIO DIRECTO: Empieza la frase directamente con: "Para [Vehículo] [Año]:".
+        3. FORMATO: Usa una lista con viñetas clara y técnica.
 
         REGLAS TÉCNICAS:
-        1. "SP" = Velocidades (Ej: 6 SP = 6 Velocidades).
-        2. Filtra por Año y Modelo.
-        3. Escribe el modelo de transmisión ("Trans Model") entre etiquetas <b></b>.
+        1. NUNCA uses la palabra "Estándar" (eso es manual). Solo "Automática".
+        2. CLASIFICACIÓN OBLIGATORIA: Debes indicar el tipo exacto:
+           - "(Automática Convencional)"
+           - "(CVT)"
+           - "(DSG / Doble Embrague)"
+        3. HTML: Pon el CÓDIGO/MODELO de la transmisión entre <b> y </b>.
+        4. VARIANTES: Si hay varias opciones (ej. Motor 2.0 vs 2.5), especifica cuál es cuál.
 
-        Ejemplo de respuesta ideal:
-        "Para Volkswagen Golf 2015:
-        - <b>09G</b> (Automática Convencional 6 Vel, Motor 1.8L) - Para versión Base.
-        - <b>02E</b> (DSG / Doble Embrague 6 Vel, Motor 2.0L TDI) - Para versión Diesel.
-        - <b>0AM</b> (DSG / Doble Embrague 7 Vel, Motor 1.4L)"
+        Ejemplo de Salida Deseada:
+        "Para Volkswagen Jetta 2014:
+        - <b>09G</b> (Automática Convencional, 6 Vel) - Motor 2.5L
+        - <b>0AM</b> (DSG / Doble Embrague, 7 Vel) - Motor 1.4L Turbo"
     `;
 
     try {
@@ -102,11 +103,11 @@ export default async function handler(request, response) {
             body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
         });
 
-        // MANEJO DE ERROR 429 (CUOTA) - MENSAJE PROFESIONAL
+        // Manejo de Error 429 (Seguridad adicional)
         if (geminiResponse.status === 429) {
             console.warn("Cuota de API excedida (429).");
             return response.status(200).json({ 
-                reply: "⚠️ <b>Alta demanda de consultas.</b><br>Nuestros servidores están procesando muchas búsquedas en este momento.<br>Por favor, espera <b>30 segundos</b> e inténtalo de nuevo." 
+                reply: "⚠️ <b>Alta demanda.</b><br>Estamos procesando muchas solicitudes. Por favor intenta en unos segundos." 
             });
         }
 
@@ -118,7 +119,7 @@ export default async function handler(request, response) {
         const data = await geminiResponse.json();
 
         if (!data.candidates || !data.candidates[0] || !data.candidates[0].content) {
-             return response.status(200).json({ reply: "No se pudo generar una respuesta clara. Intenta especificar el año completo." });
+             return response.status(200).json({ reply: "No se pudo generar una respuesta clara." });
         }
 
         const textResponse = data.candidates[0].content.parts[0].text;
@@ -127,9 +128,8 @@ export default async function handler(request, response) {
 
     } catch (error) {
         console.error("Error en la fase de IA:", error);
-        // Mensaje genérico profesional
         return response.status(200).json({ 
-            reply: "Ocurrió un problema técnico temporal en nuestros servidores. Por favor intenta buscar de nuevo." 
+            reply: "Ocurrió un problema técnico temporal. Por favor intenta buscar de nuevo." 
         });
     }
 }
