@@ -38,7 +38,7 @@ export default async function handler(request, response) {
         return response.status(400).json({ reply: "Por favor, ingresa un vehículo para buscar." });
     }
     
-    // 3. Lógica de 2 Dígitos y Filtro Rápido
+    // 3. Lógica de 2 Dígitos
     const expandedQuery = userQuery.replace(/\b(\d{2})\b/g, (match) => {
         const n = parseInt(match, 10);
         if (n >= 80 && n <= 99) return `19${match}`;
@@ -49,16 +49,28 @@ export default async function handler(request, response) {
     const lowerCaseQuery = expandedQuery.toLowerCase().trim();
     const queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 1);
 
-    // --- CORRECCIÓN CRÍTICA DE SEGURIDAD (EVERY en lugar de SOME) ---
-    // Solo aceptamos candidatos que contengan TODAS las palabras buscadas.
-    // Esto permite que "Cherokee" encuentre "Grand Cherokee", pero evita que "Cherokee 2000" traiga "Ford 2000".
+    // --- CORRECCIÓN DEL FILTRO: ESTRICTO EN NOMBRE, FLEXIBLE EN AÑO ---
+    // Identificamos qué partes son palabras (letras) y cuáles son números (años)
+    const textParts = queryParts.filter(part => isNaN(part)); // Ej: ['cherokee']
+    
     const candidates = transmissionData.filter(item => {
         const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
-        return queryParts.every(part => itemText.includes(part));
-    }).slice(0, 30); 
+        
+        // REGLA 1: Si el usuario escribió palabras (ej: Cherokee), el registro DEBE tenerlas todas.
+        // Esto evita basura (ej: Ford Focus) pero permite "Grand Cherokee" si buscaste "Cherokee".
+        if (textParts.length > 0) {
+            const matchesWords = textParts.every(word => itemText.includes(word));
+            if (!matchesWords) return false;
+        }
+
+        // REGLA 2: No filtramos por año aquí con .includes().
+        // ¿Por qué? Porque si buscas "2000" y el JSON dice "98-01", .includes() fallaría.
+        // Dejamos pasar TODOS los modelos coincidentes de nombre para que la IA haga la matemática del año.
+        return true;
+    }).slice(0, 40); // Aumentamos a 40 para asegurar que quepan todos los años del modelo
 
     if (candidates.length === 0) {
-        return response.status(200).json({ reply: `No se encontraron coincidencias exactas para "${userQuery}". Intenta verificar el nombre o el año.` });
+        return response.status(200).json({ reply: `No se encontraron coincidencias para "${userQuery}". Verifica el nombre del modelo.` });
     }
 
     // 4. ANÁLISIS INTELIGENTE CON IA
@@ -67,7 +79,7 @@ export default async function handler(request, response) {
 
     const contextForAI = JSON.stringify(candidates);
 
-    // --- PROMPT DE SEGURIDAD MÁXIMA ---
+    // --- PROMPT DE EXPERTO (MANTENIDO) ---
     const prompt = `
         ROL: Motor de búsqueda estricto de autopartes.
         DATOS DISPONIBLES (JSON):
@@ -77,14 +89,15 @@ export default async function handler(request, response) {
         INPUT USUARIO: "${expandedQuery}"
 
         REGLAS ANTI-ALUCINACIÓN (CRÍTICAS):
-        1. SOLO usa los vehículos listados en DATOS DISPONIBLES. Si no está ahí, no existe.
-        2. NO mezcles información. Si hay dos modelos distintos (Ej: Cherokee y Grand Cherokee), sepáralos claramente.
-        3. Si el usuario busca un nombre genérico (Ej: "Cherokee"), muestra TODOS los modelos que contengan ese nombre (Ej: Cherokee Sport y Grand Cherokee).
+        1. SOLO usa los vehículos listados en DATOS DISPONIBLES.
+        2. IMPORTANTE: El usuario busca un año específico. Revisa los rangos de años en el JSON (Ej: "98-02" incluye el año 2000).
+        3. Si el rango de años NO cubre lo que pide el usuario, DESCÁRTALO.
 
         INSTRUCCIONES DE RESPUESTA:
         1. SILENCIO DE ROL: Empieza directo con "Resultados para [Búsqueda]:".
         2. FORMATO: Lista con viñetas.
-        3. NOMBRE EXACTO: Usa el nombre completo del modelo tal cual viene en la base de datos para evitar confusiones.
+        3. NOMBRE EXACTO: Usa el nombre completo (Cherokee vs Grand Cherokee).
+        4. Si buscas "Cherokee" y hay "Grand Cherokee", muestra ambos SI coinciden con el año.
 
         REGLAS TÉCNICAS:
         1. NO uses la palabra "Estándar".
