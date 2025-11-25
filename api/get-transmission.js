@@ -39,7 +39,6 @@ export default async function handler(request, response) {
     }
     
     // 3. Lógica de 2 Dígitos y Filtro Rápido
-    // Convierte "04" -> "2004", "98" -> "1998" para la búsqueda
     const expandedQuery = userQuery.replace(/\b(\d{2})\b/g, (match) => {
         const n = parseInt(match, 10);
         if (n >= 80 && n <= 99) return `19${match}`;
@@ -50,7 +49,6 @@ export default async function handler(request, response) {
     const lowerCaseQuery = expandedQuery.toLowerCase().trim();
     const queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 1);
 
-    // Filtramos buscando coincidencias de texto
     const candidates = transmissionData.filter(item => {
         const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
         return queryParts.some(part => itemText.includes(part));
@@ -66,7 +64,7 @@ export default async function handler(request, response) {
 
     const contextForAI = JSON.stringify(candidates);
 
-    // --- PROMPT DE EXPERTO SILENCIOSO ---
+    // --- PROMPT CON LIMPIEZA DE "AVO/TBD" ---
     const prompt = `
         ROL INTERNO: Ingeniero experto en transmisiones automáticas.
         OBJETIVO: Identificar la transmisión exacta para el vehículo del cliente.
@@ -78,22 +76,25 @@ export default async function handler(request, response) {
 
         INSTRUCCIONES DE RESPUESTA (ESTRICTAS):
         1. SILENCIO DE ROL: NO menciones "soy un experto", "basado en la información" ni "hola".
-        2. INICIO DIRECTO: Empieza la frase directamente con: "Para [Vehículo] [Año]:".
-        3. FORMATO: Usa una lista con viñetas clara y técnica.
+        2. INICIO DIRECTO: Empieza con: "Para [Vehículo] [Año]:".
+        3. FORMATO: Usa una lista con viñetas clara.
+
+        REGLAS DE LIMPIEZA DE DATOS (CRÍTICO):
+        1. Si el "Trans Model" es "AVO", "TBD" o "N/A": NO lo pongas en negritas. Escribe "Modelo por confirmar / Varias opciones".
+        2. NO inventes códigos si dicen AVO.
 
         REGLAS TÉCNICAS:
-        1. NUNCA uses la palabra "Estándar" (eso es manual). Solo "Automática".
+        1. NUNCA uses la palabra "Estándar". Solo "Automática".
         2. CLASIFICACIÓN OBLIGATORIA: Debes indicar el tipo exacto:
            - "(Automática Convencional)"
            - "(CVT)"
            - "(DSG / Doble Embrague)"
-        3. HTML: Pon el CÓDIGO/MODELO de la transmisión entre <b> y </b>.
-        4. VARIANTES: Si hay varias opciones (ej. Motor 2.0 vs 2.5), especifica cuál es cuál.
-
+        3. HTML: Pon el CÓDIGO/MODELO (si es válido) entre <b> y </b>.
+        
         Ejemplo de Salida Deseada:
-        "Para Volkswagen Jetta 2014:
-        - <b>09G</b> (Automática Convencional, 6 Vel) - Motor 2.5L
-        - <b>0AM</b> (DSG / Doble Embrague, 7 Vel) - Motor 1.4L Turbo"
+        "Para Nissan Sentra 2010:
+        - <b>JF011E</b> (CVT) - Motor 2.5L
+        - Modelo por confirmar (AVO) - Motor 2.0L (Requiere revisión física)"
     `;
 
     try {
@@ -103,7 +104,6 @@ export default async function handler(request, response) {
             body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
         });
 
-        // Manejo de Error 429 (Seguridad adicional)
         if (geminiResponse.status === 429) {
             console.warn("Cuota de API excedida (429).");
             return response.status(200).json({ 
