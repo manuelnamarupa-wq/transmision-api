@@ -1,10 +1,44 @@
 const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmision-api/main/api/transmissions.json';
 
-// --- SISTEMA DE CACHÉ ---
 let transmissionData = [];
 let uniqueModelsStr = ""; 
 let dataLoaded = false;
 let lastLoadTime = 0;
+
+// --- FUNCIÓN MATEMÁTICA DE AÑOS (EL CEREBRO NUEVO) ---
+// Convierte "98-02", "99-UP", "04" en rangos numéricos y verifica si el año del usuario entra.
+function isYearInRange(rangeStr, targetYearStr) {
+    if (!rangeStr || !targetYearStr) return false;
+    const target = parseInt(targetYearStr, 10);
+    
+    // Limpieza básica
+    let cleanRange = rangeStr.replace(/\s/g, '').toUpperCase();
+    
+    // Caso 1: Rango "98-02"
+    if (cleanRange.includes('-') && !cleanRange.includes('UP')) {
+        const parts = cleanRange.split('-');
+        let start = parseInt(parts[0], 10);
+        let end = parseInt(parts[1], 10);
+        
+        // Convertir 2 dígitos a 4 (98->1998, 02->2002)
+        if (start < 100) start += (start > 50 ? 1900 : 2000);
+        if (end < 100) end += (end > 50 ? 1900 : 2000);
+        
+        return target >= start && target <= end;
+    }
+    
+    // Caso 2: "99-UP" o "99+"
+    if (cleanRange.includes('UP') || cleanRange.includes('+')) {
+        let start = parseInt(cleanRange.replace('UP','').replace('+','').replace('-',''), 10);
+        if (start < 100) start += (start > 50 ? 1900 : 2000);
+        return target >= start;
+    }
+
+    // Caso 3: Año único "2004" o "04"
+    let single = parseInt(cleanRange, 10);
+    if (single < 100) single += (single > 50 ? 1900 : 2000);
+    return target === single;
+}
 
 async function loadData() {
     const now = Date.now();
@@ -43,43 +77,36 @@ export default async function handler(request, response) {
     const userQuery = request.body.query;
     if (!userQuery) return response.status(400).json({ reply: "Ingresa un vehículo." });
     
-    // 3. Limpieza de Texto
-    const expandedQuery = userQuery.replace(/\b(\d{2})\b/g, (match) => {
-        const n = parseInt(match, 10);
-        if (n >= 80 && n <= 99) return `19${match}`;
-        if (n >= 0 && n <= 30) return `20${match}`;
-        return match;
-    });
+    // Detectar año en la búsqueda del usuario (Ej: 2000)
+    const yearRegex = /\b(19|20)\d{2}\b/;
+    const yearMatch = userQuery.match(yearRegex);
+    const userYear = yearMatch ? yearMatch[0] : null;
 
-    const lowerCaseQuery = expandedQuery.toLowerCase().trim();
-    let queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 0);
-    const stopWords = ['cambios', 'cambio', 'velocidades', 'velocidad', 'vel', 'marchas', 'transmision', 'caja', 'automatico', 'automatica'];
-    const activeSearchTerms = queryParts.filter(part => !stopWords.includes(part));
-    const textParts = activeSearchTerms.filter(part => isNaN(part)); 
+    // Limpieza de Texto (Quitar año del texto para filtrar mejor nombres)
+    let textQuery = userQuery;
+    if (userYear) textQuery = textQuery.replace(userYear, '').trim();
     
+    const stopWords = ['cambios', 'cambio', 'velocidades', 'velocidad', 'vel', 'marchas', 'transmision', 'caja', 'automatico', 'automatica'];
+    let queryParts = textQuery.toLowerCase().split(' ').filter(part => part.length > 0 && !stopWords.includes(part));
+
+    // --- FILTRO: TEXTO ESTRICTO ---
     const candidates = transmissionData.filter(item => {
-        const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
-        if (textParts.length > 0) {
-            if (!textParts.every(word => itemText.includes(word))) return false;
-        }
-        return true;
-    }).slice(0, 200); // Mantenemos 200 para encontrar MCTA y otras raras.
+        const itemText = `${item.Make} ${item.Model} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
+        // Todas las palabras (menos el año) deben coincidir
+        return queryParts.every(word => itemText.includes(word));
+    }).slice(0, 300); // Límite masivo para no perder MCTA
 
     const API_KEY = process.env.GEMINI_API_KEY;
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
-    // --- ESCENARIO 1: CORRECTOR (Sin cambios, funciona bien) ---
+    // --- ESCENARIO 1: CORRECTOR (USANDO LÓGICA MATEMÁTICA) ---
     if (candidates.length === 0) {
-        const yearRegex = /\b(19|20)\d{2}\b/;
-        const match = userQuery.match(yearRegex);
-        const originalYear = match ? match[0] : null;
-
         const correctionPrompt = `
             ACTÚA COMO: API JSON de corrección.
             LISTA VÁLIDA: [${uniqueModelsStr}]
-            BÚSQUEDA USUARIO: "${userQuery}"
-            TAREA: Encuentra el NOMBRE del vehículo válido más parecido.
-            FORMATO JSON: { "found": true, "suggestion": "Jeep Liberty" } o { "found": false }
+            BÚSQUEDA USUARIO: "${textQuery}"
+            TAREA: Encuentra el nombre más parecido (ignora años).
+            FORMATO JSON: { "found": true, "suggestion": "Jeep Liberty" }
         `;
 
         try {
@@ -98,59 +125,67 @@ export default async function handler(request, response) {
             if (parsed.found && parsed.suggestion) {
                 let finalSuggestion = parsed.suggestion;
                 let replyText = "";
-                if (originalYear) {
-                    const testQuery = `${finalSuggestion} ${originalYear}`.toLowerCase().split(' ');
-                    const yearExists = transmissionData.some(item => {
-                        const str = `${item.Make} ${item.Model} ${item.Years}`.toLowerCase();
-                        return testQuery.every(word => str.includes(word));
+
+                // VERIFICACIÓN MATEMÁTICA REAL
+                if (userYear) {
+                    // Buscamos en TODA la base de datos si existe ese modelo + ese año matemáticamente
+                    const cleanSuggestion = finalSuggestion.toLowerCase().split(' ');
+                    
+                    const existsMath = transmissionData.some(item => {
+                        const str = `${item.Make} ${item.Model}`.toLowerCase();
+                        // Coincide nombre Y coincide rango matemático
+                        return cleanSuggestion.every(w => str.includes(w)) && isYearInRange(item.Years, userYear);
                     });
-                    if (yearExists) {
-                        finalSuggestion = `${finalSuggestion} ${originalYear}`;
+
+                    if (existsMath) {
+                        finalSuggestion = `${finalSuggestion} ${userYear}`;
                         replyText = `¿Quisiste decir <b>${finalSuggestion}</b>?`;
                     } else {
-                        replyText = `El modelo existe, pero no encontré año ${originalYear}. ¿Quisiste decir <b>${finalSuggestion}</b> (Ver todos los años)?`;
+                        // Existe el modelo, pero NO el año
+                        replyText = `El modelo <b>${finalSuggestion}</b> existe, pero no encontré registros compatibles con el año <b>${userYear}</b>.`;
+                        // Quitamos el año de la sugerencia del botón para que busque todos
                     }
                 } else {
                     replyText = `¿Quisiste decir <b>${finalSuggestion}</b>?`;
                 }
+
                 return response.status(200).json({ reply: replyText, suggestion: finalSuggestion });
             } else {
                 return response.status(200).json({ reply: `No se encontraron coincidencias para "${userQuery}".` });
             }
         } catch (error) {
-            return response.status(200).json({ reply: `No se encontraron coincidencias para "${userQuery}".` });
+            return response.status(200).json({ reply: `No se encontraron coincidencias.` });
         }
     }
 
-    // --- ESCENARIO 2: BÚSQUEDA NORMAL (CORRECCIÓN DE FORMATO) ---
+    // --- ESCENARIO 2: BÚSQUEDA NORMAL (PARA QUE SALGA MCTA) ---
     const contextForAI = JSON.stringify(candidates);
 
     const prompt = `
-        [SYSTEM: OUTPUT MUST BE PLAIN TEXT WITH HTML TAGS. DO NOT OUTPUT JSON.]
-        
-        ROL: Catálogo experto de transmisiones.
+        [SYSTEM: RAW DATA EXTRACTION. NO GROUPING.]
+        ROL: Extractor de datos.
         DATOS (JSON):
         ---
         ${contextForAI}
         ---
-        INPUT USUARIO: "${expandedQuery}"
+        INPUT USUARIO: "${userQuery}" (Año: ${userYear || "Todos"})
 
-        REGLAS DE FORMATO (OBLIGATORIO):
-        1. NO GENERES CÓDIGO JSON. Genera una lista legible para humanos.
-        2. Usa viñetas (guiones) para cada línea.
-        3. Pon el CÓDIGO de transmisión entre <b> y </b>.
+        INSTRUCCIONES CRÍTICAS:
+        1. REVISA CADA FILA DEL JSON: Si hay 10 filas que coinciden, genera 10 líneas de texto.
+        2. PROHIBIDO AGRUPAR: No escribas "MAXA, BAXA". Escribe una línea para MAXA y otra para BAXA.
+        3. EXHAUSTIVIDAD: Busca códigos raros (MCTA, B7XA, etc.). Si están en el JSON y coinciden con el año, PONLOS.
         
-        REGLAS DE CONTENIDO:
-        1. AGRUPACIÓN: Si la base de datos dice "MAXA, BAXA", puedes mostrarlas juntas.
-        2. EXHAUSTIVIDAD: Si hay otras variantes (como MCTA, B7XA) para el mismo año, DEBES generar líneas separadas para ellas. ¡No las omitas!
-        3. AÑOS: Si el año del usuario no coincide con el rango, pon: "(Año [Año] no disponible, ver rango)".
-        4. TECNOLOGÍA: Indica siempre (Automática Convencional / CVT / DSG).
+        LÓGICA DE AÑO:
+        - Si el usuario especificó un año (Ej: 2000), usa la lógica matemática: ¿El 2000 está dentro del rango "Years" (Ej: 98-02)? Si sí, inclúyelo.
+        - Si el año no coincide, descártalo o pon una nota.
 
-        Ejemplo de Respuesta Correcta:
-        "Resultados para Honda Accord 2000:
-        - Accord (4 Cil): <b>MAXA, BAXA</b> (Automática Convencional, 4 Vel, FWD) - Motor 2.3L
-        - Accord (V6): <b>B7XA</b> (Automática Convencional, 4 Vel, FWD) - Motor 3.0L
-        - Accord (Especial): <b>MCTA</b> (Automática Convencional, 4 Vel, FWD) - Motor 2.3L"
+        FORMATO VISUAL:
+        - [Vehículo]: <b>[CODIGO]</b> ([Tipo], [Vel], [Tracción]) - [Motor]
+
+        Ejemplo Desagregado:
+        - Honda Accord: <b>BAXA</b> (...) - Motor 2.3L
+        - Honda Accord: <b>MAXA</b> (...) - Motor 2.3L
+        - Honda Accord: <b>MCTA</b> (...) - Motor 2.3L
     `;
 
     try {
@@ -170,20 +205,15 @@ export default async function handler(request, response) {
         }
 
         const data = await geminiResponse.json();
-        let textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "Sin respuesta clara.";
+        let textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "Sin respuesta.";
         
-        // --- LIMPIEZA DE EMERGENCIA ---
-        // Si la IA vuelve a mandar JSON o bloques de código, los eliminamos a la fuerza.
         textResponse = textResponse.replace(/```json/g, '').replace(/```/g, '');
-
-        let safeResponse = textResponse
-            .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') 
-            .replace(/\n/g, '<br>');
+        let safeResponse = textResponse.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\n/g, '<br>');
 
         return response.status(200).json({ reply: safeResponse });
 
     } catch (error) {
         console.error("Error backend:", error);
-        return response.status(200).json({ reply: "Ocurrió un problema técnico. Intenta de nuevo." });
+        return response.status(200).json({ reply: "Ocurrió un problema técnico." });
     }
 }
