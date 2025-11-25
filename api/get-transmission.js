@@ -73,7 +73,7 @@ export default async function handler(request, response) {
     const API_KEY = process.env.GEMINI_API_KEY;
     
     // --- MODELO ESTABLE (EL ÚNICO QUE FUNCIONA EN TU CUENTA) ---
-    const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent?key=${API_KEY}`;
+    const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${API_KEY}`;
 
     const contextForAI = JSON.stringify(candidates);
 
