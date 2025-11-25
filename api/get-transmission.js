@@ -49,13 +49,16 @@ export default async function handler(request, response) {
     const lowerCaseQuery = expandedQuery.toLowerCase().trim();
     const queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 1);
 
+    // --- CORRECCIÓN CRÍTICA DE SEGURIDAD (EVERY en lugar de SOME) ---
+    // Solo aceptamos candidatos que contengan TODAS las palabras buscadas.
+    // Esto permite que "Cherokee" encuentre "Grand Cherokee", pero evita que "Cherokee 2000" traiga "Ford 2000".
     const candidates = transmissionData.filter(item => {
         const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
-        return queryParts.some(part => itemText.includes(part));
-    }).slice(0, 25); 
+        return queryParts.every(part => itemText.includes(part));
+    }).slice(0, 30); 
 
     if (candidates.length === 0) {
-        return response.status(200).json({ reply: `No se encontraron coincidencias iniciales para "${userQuery}" en la plantilla.` });
+        return response.status(200).json({ reply: `No se encontraron coincidencias exactas para "${userQuery}". Intenta verificar el nombre o el año.` });
     }
 
     // 4. ANÁLISIS INTELIGENTE CON IA
@@ -64,31 +67,35 @@ export default async function handler(request, response) {
 
     const contextForAI = JSON.stringify(candidates);
 
-    // --- PROMPT FINAL: EXPERTO SILENCIOSO + DISTINCIÓN DE NOMBRES ---
+    // --- PROMPT DE SEGURIDAD MÁXIMA ---
     const prompt = `
-        ROL: Sistema experto en identificación de transmisiones.
+        ROL: Motor de búsqueda estricto de autopartes.
         DATOS DISPONIBLES (JSON):
         ---
         ${contextForAI}
         ---
         INPUT USUARIO: "${expandedQuery}"
 
-        INSTRUCCIONES DE RESPUESTA (ESTRICTAS):
-        1. SILENCIO DE ROL: Empieza directo con "Para [Vehículo] [Año]:".
-        2. NO uses la palabra "Estándar".
-        3. SI MODELO ES "AVO" o "TBD": Escribe "Modelo por confirmar" sin negritas.
+        REGLAS ANTI-ALUCINACIÓN (CRÍTICAS):
+        1. SOLO usa los vehículos listados en DATOS DISPONIBLES. Si no está ahí, no existe.
+        2. NO mezcles información. Si hay dos modelos distintos (Ej: Cherokee y Grand Cherokee), sepáralos claramente.
+        3. Si el usuario busca un nombre genérico (Ej: "Cherokee"), muestra TODOS los modelos que contengan ese nombre (Ej: Cherokee Sport y Grand Cherokee).
 
-        REGLAS DE PRECISIÓN (IMPORTANTE):
-        1. NOMBRES COMPUESTOS: Distingue modelos similares. 
-           - Si el usuario buscó "Cherokee", NO muestres resultados de "Grand Cherokee" a menos que no haya otra opción, y si lo haces, aclara que es "Grand Cherokee".
-           - Diferencia "Sport" de "Versión Normal".
-        2. VERSIONES: Si el JSON menciona variantes (GTI, Sportwagen), MENCIONÁLAS.
+        INSTRUCCIONES DE RESPUESTA:
+        1. SILENCIO DE ROL: Empieza directo con "Resultados para [Búsqueda]:".
+        2. FORMATO: Lista con viñetas.
+        3. NOMBRE EXACTO: Usa el nombre completo del modelo tal cual viene en la base de datos para evitar confusiones.
+
+        REGLAS TÉCNICAS:
+        1. NO uses la palabra "Estándar".
+        2. SI MODELO ES "AVO" o "TBD": Escribe "Modelo por confirmar" sin negritas.
         3. TRACCIÓN: Indica SIEMPRE (FWD), (RWD) o (AWD/4WD).
         4. TECNOLOGÍA: Clasifica (CVT), (DSG / Doble Embrague) o (Automática Convencional).
 
-        FORMATO VISUAL:
-        "Para [Vehículo] [Año]:
-        - <b>[Modelo Trans]</b> ([Tecnología], [Velocidades], [Tracción]) - [Motor/Versión]"
+        Ejemplo de Salida Segura:
+        "Resultados para Jeep Cherokee 2000:
+        - Jeep Cherokee Classic: <b>AW4</b> (Automática Convencional, 4 Vel, RWD) - Motor 4.0L
+        - Jeep Grand Cherokee Laredo: <b>42RE</b> (Automática Convencional, 4 Vel, AWD) - Motor 4.0L"
     `;
 
     try {
