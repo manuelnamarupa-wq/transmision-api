@@ -1,46 +1,41 @@
 const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmision-api/main/api/transmissions.json';
 
-// Cache en memoria del servidor (para que no descargue GitHub cada vez)
+// Cache en memoria
 let transmissionData = [];
 let dataLoaded = false;
 let lastLoadTime = 0;
 
 async function loadData() {
     const now = Date.now();
-    // Recargamos solo si no hay datos o si pasaron más de 1 hora (3600000 ms)
+    // Cache de 1 hora
     if (!dataLoaded || (now - lastLoadTime > 3600000)) {
         try {
-            console.time("DescargaGitHub");
             const response = await fetch(DATA_URL);
-            if (!response.ok) throw new Error('Error al conectar con GitHub Raw.');
+            if (!response.ok) throw new Error('Error GitHub Raw.');
             transmissionData = await response.json();
             dataLoaded = true;
             lastLoadTime = now;
-            console.timeEnd("DescargaGitHub");
-            console.log(`Base de datos actualizada: ${transmissionData.length} registros.`);
+            console.log(`BD Actualizada: ${transmissionData.length} registros.`);
         } catch (error) {
-            console.error('Error crítico cargando JSON:', error);
-            // Si falla y ya teníamos datos, no rompemos el flujo, usamos los viejos
+            console.error('Error carga JSON:', error);
             if (!dataLoaded) throw error; 
         }
     }
 }
 
 export default async function handler(request, response) {
-    const tStart = Date.now(); // Cronómetro inicio
-
-    // 1. CORS
+    // 1. Configuración CORS
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
     if (request.method === 'OPTIONS') return response.status(200).end();
     
-    // 2. Carga de Datos (Con caché inteligente)
+    // 2. Carga de Datos
     try {
         await loadData();
     } catch (e) {
-        return response.status(500).json({ reply: "Error de servidor: No se pudo conectar con la base de datos." });
+        return response.status(500).json({ reply: "Error de conexión con base de datos." });
     }
 
     const userQuery = request.body.query;
@@ -57,7 +52,7 @@ export default async function handler(request, response) {
     const lowerCaseQuery = expandedQuery.toLowerCase().trim();
     const queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 1);
 
-    // --- FILTRO HÍBRIDO (Nombre estricto, Año flexible) ---
+    // --- FILTRO HÍBRIDO ---
     const textParts = queryParts.filter(part => isNaN(part)); 
     
     const candidates = transmissionData.filter(item => {
@@ -66,45 +61,45 @@ export default async function handler(request, response) {
             if (!textParts.every(word => itemText.includes(word))) return false;
         }
         return true;
-    }).slice(0, 15); // Solo 15 candidatos para máxima velocidad
+    }).slice(0, 60); // <--- CAMBIO CRÍTICO: Aumentamos de 15 a 60 para que quepan TODAS las variantes.
 
     if (candidates.length === 0) {
         return response.status(200).json({ reply: `No se encontraron coincidencias para "${userQuery}".` });
     }
 
-    // 4. IA FLASH 2.0 EXPERIMENTAL
+    // 4. IA FLASH 2.0 (Motor Rápido)
     const API_KEY = process.env.GEMINI_API_KEY;
-    
-    // USAMOS EL MODELO MÁS RÁPIDO DE TU LISTA: gemini-2.0-flash-exp
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
     const contextForAI = JSON.stringify(candidates);
 
     const prompt = `
-        ROL: Buscador de autopartes.
-        DATOS:
+        ROL: Ingeniero de producto de transmisiones.
+        DATOS DISPONIBLES (JSON):
         ---
         ${contextForAI}
         ---
-        INPUT: "${expandedQuery}"
+        INPUT USUARIO: "${expandedQuery}"
 
-        FORMATO OBLIGATORIO:
-        1. Código transmisión entre <b> y </b>. (Ej: <b>6F35</b>).
-        2. Si es "AVO"/"TBD", escribe "Modelo por confirmar" (sin negritas).
+        INSTRUCCIONES DE VOLUMEN (CRÍTICO):
+        1. LISTADO EXHAUSTIVO: Si hay muchas variantes (Ej: Golf tiene Base, GTI, TDI, Sportwagen), MUESTRA TODAS.
+        2. NO RESUMAS: Prefiero una lista larga y completa a una lista corta incompleta.
+        3. Si hay duplicados exactos, agrúpalos, pero si cambia el Motor o la Tracción, sepáralos en otra línea.
 
-        LÓGICA:
-        1. Solo usa los datos provistos.
-        2. Valida años matemáticamente (rangos).
-        3. Si buscas "Cherokee", incluye "Grand Cherokee" si coincide el año.
+        REGLAS DE FORMATO:
+        1. CÓDIGO TRANSMISIÓN: OBLIGATORIO entre <b> y </b>. (Ej: <b>09G</b>).
+        2. Si el modelo es "AVO" o "TBD", escribe "Modelo por confirmar" sin negritas.
 
-        DETALLES:
-        1. No digas "Estándar".
-        2. Indica (FWD/RWD/AWD).
-        3. Indica (CVT / DSG / Convencional).
+        REGLAS TÉCNICAS:
+        1. MENCIONA SIEMPRE: Tracción (FWD/RWD/AWD) y Motor (1.8L, 2.0L, TDI, etc).
+        2. NO uses la palabra "Estándar".
+        3. CLASIFICA: (CVT), (DSG / Doble Embrague) o (Automática Convencional).
 
-        Ejemplo:
-        "Resultados para Jeep Cherokee 2000:
-        - Jeep Cherokee Classic: <b>AW4</b> (Convencional, 4 Vel, RWD) - Motor 4.0L"
+        Ejemplo de Respuesta Perfecta:
+        "Resultados para Volkswagen Golf 2015:
+        - <b>09G</b> (Automática Convencional, 6 Vel, FWD) - Motor 1.8L Turbo (Versión Hatchback/Sportwagen)
+        - <b>02E</b> (DSG / Doble Embrague, 6 Vel, FWD) - Motor 2.0L TDI (Diesel)
+        - <b>02E</b> (DSG / Doble Embrague, 6 Vel, FWD) - Motor 2.0L Turbo (GTI)"
     `;
 
     try {
@@ -113,10 +108,6 @@ export default async function handler(request, response) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
         });
-
-        const tEnd = Date.now(); // Fin cronómetro
-        const seconds = ((tEnd - tStart) / 1000).toFixed(2);
-        console.log(`Tiempo total respuesta: ${seconds}s`);
 
         if (geminiResponse.status === 429) {
             return response.status(200).json({ 
