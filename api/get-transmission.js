@@ -43,7 +43,7 @@ export default async function handler(request, response) {
     const userQuery = request.body.query;
     if (!userQuery) return response.status(400).json({ reply: "Ingresa un vehículo." });
     
-    // 3. Limpieza
+    // 3. Limpieza de Texto
     const expandedQuery = userQuery.replace(/\b(\d{2})\b/g, (match) => {
         const n = parseInt(match, 10);
         if (n >= 80 && n <= 99) return `19${match}`;
@@ -68,7 +68,7 @@ export default async function handler(request, response) {
     const API_KEY = process.env.GEMINI_API_KEY;
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
-    // --- ESCENARIO 1: CORRECTOR (Aplica si no hubo coincidencias de texto) ---
+    // --- ESCENARIO 1: CORRECTOR (Si no hubo coincidencias de texto) ---
     if (candidates.length === 0) {
         const yearRegex = /\b(19|20)\d{2}\b/;
         const match = userQuery.match(yearRegex);
@@ -78,8 +78,7 @@ export default async function handler(request, response) {
             ACTÚA COMO: API JSON de corrección ortográfica.
             LISTA VÁLIDA: [${uniqueModelsStr}]
             BÚSQUEDA USUARIO: "${userQuery}"
-
-            TAREA: Encuentra el NOMBRE del vehículo válido más parecido.
+            TAREA: Encuentra el NOMBRE del vehículo más parecido (ignora el año).
             FORMATO JSON: { "found": true, "suggestion": "Jeep Liberty" } o { "found": false }
         `;
 
@@ -100,11 +99,10 @@ export default async function handler(request, response) {
             if (parsed.found && parsed.suggestion) {
                 let finalSuggestion = parsed.suggestion;
                 let replyText = "";
-                let yearExists = false;
 
                 if (originalYear) {
                     const testQuery = `${finalSuggestion} ${originalYear}`.toLowerCase().split(' ');
-                    yearExists = transmissionData.some(item => {
+                    const yearExists = transmissionData.some(item => {
                         const str = `${item.Make} ${item.Model} ${item.Years}`.toLowerCase();
                         return testQuery.every(word => str.includes(word));
                     });
@@ -113,8 +111,8 @@ export default async function handler(request, response) {
                         finalSuggestion = `${finalSuggestion} ${originalYear}`;
                         replyText = `¿Quisiste decir <b>${finalSuggestion}</b>?`;
                     } else {
-                        // AQUÍ ENTRA LA LÓGICA SI EL AÑO NO EXISTE
-                        replyText = `El modelo existe, pero no encontré año ${originalYear}. ¿Quisiste decir <b>${finalSuggestion}</b> (Ver todos los años)?`;
+                        // Si no existe el año, sugerimos buscar el modelo SIN año para ver todas las opciones
+                        replyText = `No encontré el año ${originalYear}. ¿Quisiste decir <b>${finalSuggestion}</b> (Ver todos los años)?`;
                     }
                 } else {
                     replyText = `¿Quisiste decir <b>${finalSuggestion}</b>?`;
@@ -124,17 +122,18 @@ export default async function handler(request, response) {
             } else {
                 return response.status(200).json({ reply: `No se encontraron coincidencias para "${userQuery}".` });
             }
-
         } catch (error) {
             return response.status(200).json({ reply: `No se encontraron coincidencias para "${userQuery}".` });
         }
     }
 
-    // --- ESCENARIO 2: BÚSQUEDA EXITOSA (PROMPT REFORZADO CON MATEMÁTICA DE AÑOS) ---
+    // --- ESCENARIO 2: BÚSQUEDA NORMAL (PROMPT CORREGIDO) ---
     const contextForAI = JSON.stringify(candidates);
 
     const prompt = `
-        [SYSTEM: STRICT OUTPUT.]
+        [SYSTEM INSTRUCTION: STRICT OUTPUT ONLY. NO CONVERSATIONAL FILLER.]
+        [RULE: Do NOT say "Okay", "Entendido", "Aquí tienes". Start directly with the results.]
+
         ROL: Catálogo experto de transmisiones.
         DATOS (JSON):
         ---
@@ -142,22 +141,29 @@ export default async function handler(request, response) {
         ---
         INPUT USUARIO: "${expandedQuery}"
 
-        REGLA DE MATEMÁTICA DE AÑOS (CRÍTICO):
-        1. Identifica el año que pide el usuario (Ej: 2000).
-        2. Revisa el rango "Years" en el JSON (Ej: "02-07" significa 2002 a 2007).
-        3. SI EL AÑO DEL USUARIO ESTÁ FUERA DEL RANGO:
-           - NO INVENTES UN CÓDIGO.
-           - Escribe: "- [Vehículo]: No disponible en año [Año Usuario] (Rango disponible: [Rango JSON])".
-        4. SI EL AÑO SÍ COINCIDE: Muestra el código normalmente.
+        REGLA DE MANEJO DE AÑOS (CRÍTICO - "OPCIONES CERCANAS"):
+        1. Si el usuario pide un año (Ej: 2000) y el vehículo SÍ está en la lista pero en otro rango (Ej: 2002-2007):
+           - ¡NO LO OCULTES!
+           - Muestra el vehículo disponible más cercano.
+           - Agrega la nota: "(Año [AñoUsuario] no disponible, mostrando [RangoReal])".
+           - NO digas "Modelo por confirmar".
+
+        REGLA DE TECNOLOGÍA (OBLIGATORIO):
+        En CADA línea, clasifica explícitamente:
+        - (Automática Convencional)
+        - (CVT)
+        - (DSG / Doble Embrague)
 
         REGLAS DE FORMATO:
-        1. Formato: <b>CODIGO</b>.
+        1. Formato: <b>CODIGO</b> (sin asteriscos). 
         2. "AVO"/"TBD" = "Modelo por confirmar".
-        3. Muestra Motor y Tracción.
-        4. Si buscan "Cherokee", muestra "Grand Cherokee" si el año coincide.
+        3. Desglose: Muestra Motor y Tracción (FWD/RWD).
+        4. Inclusión: Si buscan "Cherokee", muestra "Grand Cherokee" también.
 
-        Ejemplo Correcto (Si piden Liberty 2000 y el rango es 02-07):
-        "- Jeep Liberty: No existe registro para el año 2000 (El modelo inicia en 2002)."
+        Ejemplo de Respuesta Perfecta:
+        "Resultados para Jeep Liberty 2000:
+        - Jeep Liberty: <b>42RLE</b> (Automática Convencional, 4 Vel, RWD) - Motor 3.7L (Año 2000 no disponible, mostrando 2002-2007).
+        - Jeep Cherokee: <b>AW4</b> (Automática Convencional, 4 Vel, RWD) - Motor 4.0L"
     `;
 
     try {
