@@ -1,6 +1,6 @@
 const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmision-api/main/api/transmissions.json';
 
-// --- SISTEMA DE CACHÉ EN MEMORIA ---
+// --- SISTEMA DE CACHÉ ---
 let transmissionData = [];
 let uniqueModelsStr = ""; 
 let dataLoaded = false;
@@ -68,10 +68,8 @@ export default async function handler(request, response) {
     const API_KEY = process.env.GEMINI_API_KEY;
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
-    // --- ESCENARIO 1: CORRECTOR (MODIFICADO PARA INCLUIR AÑO) ---
+    // --- ESCENARIO 1: CORRECTOR (Aplica si no hubo coincidencias de texto) ---
     if (candidates.length === 0) {
-        
-        // 1. Detectamos si el usuario escribió un año (ej: 2000 o 1998)
         const yearRegex = /\b(19|20)\d{2}\b/;
         const match = userQuery.match(yearRegex);
         const originalYear = match ? match[0] : null;
@@ -81,14 +79,8 @@ export default async function handler(request, response) {
             LISTA VÁLIDA: [${uniqueModelsStr}]
             BÚSQUEDA USUARIO: "${userQuery}"
 
-            TAREA:
-            1. Encuentra el vehículo de la LISTA VÁLIDA que suene más parecido a la búsqueda.
-            2. Ignora el año para la comparación, concéntrate en el nombre.
-            
-            FORMATO JSON OBLIGATORIO:
-            { "found": true, "suggestion": "Jeep Liberty" }
-            O si no encuentras nada parecido:
-            { "found": false }
+            TAREA: Encuentra el NOMBRE del vehículo válido más parecido.
+            FORMATO JSON: { "found": true, "suggestion": "Jeep Liberty" } o { "found": false }
         `;
 
         try {
@@ -107,20 +99,28 @@ export default async function handler(request, response) {
 
             if (parsed.found && parsed.suggestion) {
                 let finalSuggestion = parsed.suggestion;
-                
-                // LÓGICA DE RESCATE DE AÑO:
-                // Si el usuario puso año, pero la IA no lo incluyó, lo pegamos nosotros.
-                if (originalYear && !finalSuggestion.includes(originalYear)) {
-                    finalSuggestion = `${finalSuggestion} ${originalYear}`;
+                let replyText = "";
+                let yearExists = false;
+
+                if (originalYear) {
+                    const testQuery = `${finalSuggestion} ${originalYear}`.toLowerCase().split(' ');
+                    yearExists = transmissionData.some(item => {
+                        const str = `${item.Make} ${item.Model} ${item.Years}`.toLowerCase();
+                        return testQuery.every(word => str.includes(word));
+                    });
+
+                    if (yearExists) {
+                        finalSuggestion = `${finalSuggestion} ${originalYear}`;
+                        replyText = `¿Quisiste decir <b>${finalSuggestion}</b>?`;
+                    } else {
+                        // AQUÍ ENTRA LA LÓGICA SI EL AÑO NO EXISTE
+                        replyText = `El modelo existe, pero no encontré año ${originalYear}. ¿Quisiste decir <b>${finalSuggestion}</b> (Ver todos los años)?`;
+                    }
+                } else {
+                    replyText = `¿Quisiste decir <b>${finalSuggestion}</b>?`;
                 }
 
-                // Generamos el texto de pregunta limpio
-                const questionText = `¿Quisiste decir <b>${finalSuggestion}</b>?`;
-
-                return response.status(200).json({ 
-                    reply: questionText, 
-                    suggestion: finalSuggestion 
-                });
+                return response.status(200).json({ reply: replyText, suggestion: finalSuggestion });
             } else {
                 return response.status(200).json({ reply: `No se encontraron coincidencias para "${userQuery}".` });
             }
@@ -130,11 +130,11 @@ export default async function handler(request, response) {
         }
     }
 
-    // --- ESCENARIO 2: BÚSQUEDA NORMAL ---
+    // --- ESCENARIO 2: BÚSQUEDA EXITOSA (PROMPT REFORZADO CON MATEMÁTICA DE AÑOS) ---
     const contextForAI = JSON.stringify(candidates);
 
     const prompt = `
-        [SYSTEM: STRICT DIRECT OUTPUT.]
+        [SYSTEM: STRICT OUTPUT.]
         ROL: Catálogo experto de transmisiones.
         DATOS (JSON):
         ---
@@ -142,16 +142,22 @@ export default async function handler(request, response) {
         ---
         INPUT USUARIO: "${expandedQuery}"
 
-        REGLAS DE NEGOCIO:
-        1. MUESTRA TODO: Desagrega todas las variantes.
-        2. INCLUSIÓN: Si buscan "Cherokee", muestra "Grand Cherokee".
-        3. FORMATO: <b>CODIGO</b> (sin asteriscos). "AVO"/"TBD" = "Modelo por confirmar".
-        4. DETALLE: Muestra Motor y Tracción.
+        REGLA DE MATEMÁTICA DE AÑOS (CRÍTICO):
+        1. Identifica el año que pide el usuario (Ej: 2000).
+        2. Revisa el rango "Years" en el JSON (Ej: "02-07" significa 2002 a 2007).
+        3. SI EL AÑO DEL USUARIO ESTÁ FUERA DEL RANGO:
+           - NO INVENTES UN CÓDIGO.
+           - Escribe: "- [Vehículo]: No disponible en año [Año Usuario] (Rango disponible: [Rango JSON])".
+        4. SI EL AÑO SÍ COINCIDE: Muestra el código normalmente.
 
-        Ejemplo de Respuesta Directa:
-        "Resultados para Honda Accord 2000:
-        - Accord (4 Cil): <b>BAXA</b> (Automática Convencional, 4 Vel, FWD) - Motor 2.3L
-        - Accord (V6): <b>B7XA</b> (Automática Convencional, 4 Vel, FWD) - Motor 3.0L"
+        REGLAS DE FORMATO:
+        1. Formato: <b>CODIGO</b>.
+        2. "AVO"/"TBD" = "Modelo por confirmar".
+        3. Muestra Motor y Tracción.
+        4. Si buscan "Cherokee", muestra "Grand Cherokee" si el año coincide.
+
+        Ejemplo Correcto (Si piden Liberty 2000 y el rango es 02-07):
+        "- Jeep Liberty: No existe registro para el año 2000 (El modelo inicia en 2002)."
     `;
 
     try {
