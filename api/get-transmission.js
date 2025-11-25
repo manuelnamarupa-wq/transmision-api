@@ -64,7 +64,7 @@ export default async function handler(request, response) {
 
     const contextForAI = JSON.stringify(candidates);
 
-    // --- PROMPT DETALLADO (VERSIONES + TRACCIÓN) ---
+    // --- PROMPT FINAL: EXPERTO SILENCIOSO + DISTINCIÓN DE NOMBRES ---
     const prompt = `
         ROL: Sistema experto en identificación de transmisiones.
         DATOS DISPONIBLES (JSON):
@@ -78,19 +78,17 @@ export default async function handler(request, response) {
         2. NO uses la palabra "Estándar".
         3. SI MODELO ES "AVO" o "TBD": Escribe "Modelo por confirmar" sin negritas.
 
-        REGLAS DE DETALLE (CRÍTICO):
-        1. VERSIONES: Si el JSON menciona variantes (Ej: GTI, Sportwagen, GLI, Coupe), MENCIONÁLAS explícitamente para diferenciar.
-        2. TRACCIÓN: Indica SIEMPRE si es Tracción Delantera (FWD), Trasera (RWD) o 4x4 (AWD/4WD).
-        3. TECNOLOGÍA: Clasifica si es (CVT), (DSG / Doble Embrague) o (Automática Convencional).
+        REGLAS DE PRECISIÓN (IMPORTANTE):
+        1. NOMBRES COMPUESTOS: Distingue modelos similares. 
+           - Si el usuario buscó "Cherokee", NO muestres resultados de "Grand Cherokee" a menos que no haya otra opción, y si lo haces, aclara que es "Grand Cherokee".
+           - Diferencia "Sport" de "Versión Normal".
+        2. VERSIONES: Si el JSON menciona variantes (GTI, Sportwagen), MENCIONÁLAS.
+        3. TRACCIÓN: Indica SIEMPRE (FWD), (RWD) o (AWD/4WD).
+        4. TECNOLOGÍA: Clasifica (CVT), (DSG / Doble Embrague) o (Automática Convencional).
 
         FORMATO VISUAL:
         "Para [Vehículo] [Año]:
         - <b>[Modelo Trans]</b> ([Tecnología], [Velocidades], [Tracción]) - [Motor/Versión]"
-
-        Ejemplo Ideal:
-        "Para Volkswagen Golf 2015:
-        - <b>09G</b> (Automática Convencional, 6 Vel, FWD) - Versión Base / Hatchback 1.8L
-        - <b>02E</b> (DSG / Doble Embrague, 6 Vel, FWD) - Versión GTI / Sportwagen 2.0L"
     `;
 
     try {
