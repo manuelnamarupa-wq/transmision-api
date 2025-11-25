@@ -49,25 +49,21 @@ export default async function handler(request, response) {
     const lowerCaseQuery = expandedQuery.toLowerCase().trim();
     const queryParts = lowerCaseQuery.split(' ').filter(part => part.length > 1);
 
-    // --- CORRECCIÓN DEL FILTRO: ESTRICTO EN NOMBRE, FLEXIBLE EN AÑO ---
-    // Identificamos qué partes son palabras (letras) y cuáles son números (años)
-    const textParts = queryParts.filter(part => isNaN(part)); // Ej: ['cherokee']
+    // --- FILTRO HÍBRIDO (ESTRICTO EN NOMBRE, FLEXIBLE EN AÑO) ---
+    const textParts = queryParts.filter(part => isNaN(part)); 
     
     const candidates = transmissionData.filter(item => {
         const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
         
-        // REGLA 1: Si el usuario escribió palabras (ej: Cherokee), el registro DEBE tenerlas todas.
-        // Esto evita basura (ej: Ford Focus) pero permite "Grand Cherokee" si buscaste "Cherokee".
+        // Regla 1: Debe contener las palabras escritas (Ej: Cherokee)
         if (textParts.length > 0) {
             const matchesWords = textParts.every(word => itemText.includes(word));
             if (!matchesWords) return false;
         }
 
-        // REGLA 2: No filtramos por año aquí con .includes().
-        // ¿Por qué? Porque si buscas "2000" y el JSON dice "98-01", .includes() fallaría.
-        // Dejamos pasar TODOS los modelos coincidentes de nombre para que la IA haga la matemática del año.
+        // Regla 2: Dejamos pasar los años para que la IA los analice (matemáticas de rangos)
         return true;
-    }).slice(0, 40); // Aumentamos a 40 para asegurar que quepan todos los años del modelo
+    }).slice(0, 40);
 
     if (candidates.length === 0) {
         return response.status(200).json({ reply: `No se encontraron coincidencias para "${userQuery}". Verifica el nombre del modelo.` });
@@ -79,7 +75,7 @@ export default async function handler(request, response) {
 
     const contextForAI = JSON.stringify(candidates);
 
-    // --- PROMPT DE EXPERTO (MANTENIDO) ---
+    // --- PROMPT CON FORMATO VISUAL RESTAURADO ---
     const prompt = `
         ROL: Motor de búsqueda estricto de autopartes.
         DATOS DISPONIBLES (JSON):
@@ -88,24 +84,21 @@ export default async function handler(request, response) {
         ---
         INPUT USUARIO: "${expandedQuery}"
 
-        REGLAS ANTI-ALUCINACIÓN (CRÍTICAS):
-        1. SOLO usa los vehículos listados en DATOS DISPONIBLES.
-        2. IMPORTANTE: El usuario busca un año específico. Revisa los rangos de años en el JSON (Ej: "98-02" incluye el año 2000).
-        3. Si el rango de años NO cubre lo que pide el usuario, DESCÁRTALO.
+        REGLAS DE FORMATO (IMPORTANTE):
+        1. CÓDIGO TRANSMISIÓN: Debe ir OBLIGATORIAMENTE entre etiquetas <b> y </b>. (Ejemplo: <b>6F35</b>). Esto activa el color azul.
+        2. Si el modelo es "AVO" o "TBD", NO uses negritas.
 
-        INSTRUCCIONES DE RESPUESTA:
-        1. SILENCIO DE ROL: Empieza directo con "Resultados para [Búsqueda]:".
-        2. FORMATO: Lista con viñetas.
-        3. NOMBRE EXACTO: Usa el nombre completo (Cherokee vs Grand Cherokee).
-        4. Si buscas "Cherokee" y hay "Grand Cherokee", muestra ambos SI coinciden con el año.
+        REGLAS DE LÓGICA:
+        1. SOLO usa los vehículos listados en DATOS DISPONIBLES.
+        2. Revisa los rangos de años en el JSON (Ej: "98-02" incluye el 2000). Si el año coincide, inclúyelo.
+        3. Si buscas "Cherokee" y también aparece "Grand Cherokee" que coincida en año, muestra AMBOS diferenciándolos por nombre completo.
 
         REGLAS TÉCNICAS:
         1. NO uses la palabra "Estándar".
-        2. SI MODELO ES "AVO" o "TBD": Escribe "Modelo por confirmar" sin negritas.
-        3. TRACCIÓN: Indica SIEMPRE (FWD), (RWD) o (AWD/4WD).
-        4. TECNOLOGÍA: Clasifica (CVT), (DSG / Doble Embrague) o (Automática Convencional).
+        2. TRACCIÓN: Indica SIEMPRE (FWD), (RWD) o (AWD/4WD).
+        3. TECNOLOGÍA: Clasifica (CVT), (DSG / Doble Embrague) o (Automática Convencional).
 
-        Ejemplo de Salida Segura:
+        Ejemplo de Respuesta Perfecta:
         "Resultados para Jeep Cherokee 2000:
         - Jeep Cherokee Classic: <b>AW4</b> (Automática Convencional, 4 Vel, RWD) - Motor 4.0L
         - Jeep Grand Cherokee Laredo: <b>42RE</b> (Automática Convencional, 4 Vel, AWD) - Motor 4.0L"
