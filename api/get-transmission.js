@@ -11,7 +11,6 @@ function isYearInRange(rangeStr, targetYearStr) {
     const target = parseInt(targetYearStr, 10);
     let cleanRange = rangeStr.replace(/\s/g, '').toUpperCase();
     
-    // Rango "98-02"
     if (cleanRange.includes('-') && !cleanRange.includes('UP')) {
         const parts = cleanRange.split('-');
         let start = parseInt(parts[0], 10);
@@ -20,13 +19,11 @@ function isYearInRange(rangeStr, targetYearStr) {
         if (end < 100) end += (end > 50 ? 1900 : 2000);
         return target >= start && target <= end;
     }
-    // Rango "99-UP"
     if (cleanRange.includes('UP') || cleanRange.includes('+')) {
         let start = parseInt(cleanRange.replace('UP','').replace('+','').replace('-',''), 10);
         if (start < 100) start += (start > 50 ? 1900 : 2000);
         return target >= start;
     }
-    // Año único
     let single = parseInt(cleanRange, 10);
     if (single < 100) single += (single > 50 ? 1900 : 2000);
     return target === single;
@@ -67,33 +64,20 @@ export default async function handler(request, response) {
     const userQuery = request.body.query;
     if (!userQuery) return response.status(400).json({ reply: "Ingresa un vehículo." });
     
-    // --- PASO 1: EXPANSIÓN DE AÑOS (CRÍTICO: MOVIDO AL INICIO) ---
-    // Convertimos "Accord 96" -> "Accord 1996" ANTES de analizar nada más.
-    const expandedQuery = userQuery.replace(/\b(\d{2})\b/g, (match) => {
-        const n = parseInt(match, 10);
-        // Lógica de corte: 80-99 son 19xx, 00-30 son 20xx
-        if (n >= 80 && n <= 99) return `19${match}`;
-        if (n >= 0 && n <= 30) return `20${match}`;
-        return match;
-    });
-
-    // --- PASO 2: DETECCIÓN DE AÑO (Usando ya el texto expandido) ---
     const yearRegex = /\b(19|20)\d{2}\b/;
-    const yearMatch = expandedQuery.match(yearRegex); // <--- AHORA SÍ ENCUENTRA 1996
+    const yearMatch = userQuery.match(yearRegex);
     const userYear = yearMatch ? yearMatch[0] : null;
 
-    // --- PASO 3: LIMPIEZA DE TEXTO ---
-    let textQuery = expandedQuery;
+    let textQuery = userQuery;
     if (userYear) textQuery = textQuery.replace(userYear, '').trim();
     
     const stopWords = ['cambios', 'cambio', 'velocidades', 'velocidad', 'vel', 'marchas', 'transmision', 'caja', 'automatico', 'automatica'];
     let queryParts = textQuery.toLowerCase().split(' ').filter(part => part.length > 0 && !stopWords.includes(part));
 
-    // --- ESTRATEGIA ---
     let candidates = [];
     let searchMode = ""; 
 
-    // NIVEL A: Exacto
+    // Nivel A: Exacto
     if (userYear) {
         candidates = transmissionData.filter(item => {
             const itemText = `${item.Make} ${item.Model} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
@@ -102,7 +86,7 @@ export default async function handler(request, response) {
         if (candidates.length > 0) searchMode = "EXACT_YEAR";
     }
 
-    // NIVEL B: General
+    // Nivel B: General
     if (candidates.length === 0) {
         candidates = transmissionData.filter(item => {
             const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
@@ -111,13 +95,13 @@ export default async function handler(request, response) {
         if (candidates.length > 0) searchMode = "ALL_YEARS";
     }
 
-    // NIVEL C: Corrector
+    // Nivel C: Corrector
     if (candidates.length === 0) searchMode = "SPELL_CHECK";
 
     const API_KEY = process.env.GEMINI_API_KEY;
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
-    // 1. CORRECTOR
+    // --- 1. CORRECTOR ---
     if (searchMode === "SPELL_CHECK") {
         const correctionPrompt = `
             ACTÚA COMO: API JSON de corrección.
@@ -140,13 +124,20 @@ export default async function handler(request, response) {
             if (parsed.found && parsed.suggestion) {
                 let replyText = `No encontré coincidencias. ¿Quisiste decir <b>${parsed.suggestion}</b>?`;
                 let cleanSugg = parsed.suggestion;
+                
+                // REBOTE DE AÑO MEJORADO
+                // Si la sugerencia + el año existen, mandamos la sugerencia completa
                 if (userYear) {
                      const existsMath = transmissionData.some(item => {
                         const str = `${item.Make} ${item.Model}`.toLowerCase();
                         return parsed.suggestion.toLowerCase().split(' ').every(w => str.includes(w)) && isYearInRange(item.Years, userYear);
                     });
-                    if (existsMath) cleanSugg += ` ${userYear}`;
-                    else replyText = `El modelo existe, pero no el año ${userYear}. ¿Quisiste decir <b>${parsed.suggestion}</b> (Ver todos los años)?`;
+                    if (existsMath) {
+                        cleanSugg += ` ${userYear}`;
+                    } else {
+                        // Si no existe, mandamos sugerencia SIN año para que entre a ALL_YEARS
+                        replyText = `El modelo existe, pero no el año ${userYear}. ¿Quisiste decir <b>${parsed.suggestion}</b> (Ver todos los años)?`;
+                    }
                 }
                 return response.status(200).json({ reply: replyText, suggestion: cleanSugg });
             } else {
@@ -155,18 +146,27 @@ export default async function handler(request, response) {
         } catch (e) { return response.status(200).json({ reply: "Sin resultados." }); }
     }
 
-    // 2. BÚSQUEDA NORMAL
-    const finalCandidates = candidates.slice(0, 200);
+    // --- 2. BÚSQUEDA NORMAL ---
+    // Subimos a 300 para asegurar que entren todos los Jettas y Accords
+    const finalCandidates = candidates.slice(0, 300); 
     const contextForAI = JSON.stringify(finalCandidates);
     let prompt = "";
 
-    // Reglas Base
+    // Reglas Base - AQUÍ ESTÁ LA NUEVA LÓGICA DE AGRUPACIÓN
     const baseRules = `
-        REGLAS DE NEGOCIO:
-        1. MUESTRA TODO: Desagrega códigos.
-        2. SI EL CÓDIGO ES "AVO" O "TBD": Escribe "Por Definir".
-        3. FORMATO: <b>CODIGO</b>.
-        4. TECNOLOGÍA: Indica (CVT / DSG / Automática Convencional).
+        REGLAS DE AGRUPACIÓN (INTELIGENTE):
+        1. OBJETIVO: Generar una lista limpia y concisa, pero COMPLETA.
+        2. SI EL CÓDIGO ES IDÉNTICO (Ej: "01M" aparece 5 veces con motores 1.8, 2.0, 1.9):
+           - ¡AGRÚPALOS! Genera UNA sola línea.
+           - Lista los motores: "Motores: 1.8L, 2.0L, 1.9L".
+        3. SI EL CÓDIGO ES DIFERENTE (Ej: "096", "01M", "AG4", "JF506E"):
+           - ¡SEPÁRALOS! Cada código distinto DEBE tener su propia línea.
+           - NO omitas ninguno. Si hay 4 códigos distintos, quiero 4 líneas.
+        
+        REGLAS DE FORMATO:
+        1. Formato: <b>CODIGO</b> ([Tipo], [Vel], [Tracción]) - [Lista de Motores]
+        2. "AVO"/"TBD" = "Por Definir".
+        3. Tecnología: Indica (CVT / DSG / Automática Convencional).
     `;
 
     if (searchMode === "EXACT_YEAR") {
@@ -177,8 +177,8 @@ export default async function handler(request, response) {
             ${contextForAI}
             ---
             ${baseRules}
-            CONTEXTO: Datos ya filtrados para el año ${userYear}.
-            Formato: [Modelo]: <b>[CODIGO]</b> ([Tipo], [Vel], [Tracción]) - [Motor]
+            CONTEXTO: Datos ya filtrados matemáticamente para el año ${userYear}.
+            TAREA: Lista todas las transmisiones únicas disponibles para este año. Agrupa por código.
         `;
     } else { 
         prompt = `
@@ -189,11 +189,9 @@ export default async function handler(request, response) {
             ${contextForAI}
             ---
             ${baseRules}
-            REGLAS VISUALES (CRÍTICO):
+            REGLAS VISUALES:
             1. ¡SOLO pon en negritas <b> el CÓDIGO!
-            2. PROHIBIDO poner en negritas el nombre del auto.
-            
-            Nota de Año: Si el usuario pidió año ${userYear || "N/A"} y no está, pon nota: "No encontré año ${userYear}, mostrando cercanos:".
+            2. Nota de Año: Si el usuario pidió año ${userYear || "N/A"} y no está, pon nota al inicio.
         `;
     }
 
