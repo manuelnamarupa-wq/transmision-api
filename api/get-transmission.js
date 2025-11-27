@@ -66,24 +66,18 @@ export default async function handler(request, response) {
     const userQuery = request.body.query;
     if (!userQuery) return response.status(400).json({ reply: "Ingresa un vehículo." });
     
-    // --- 1. DETECCIÓN DE VELOCIDAD (PRIORIDAD ALTA) ---
-    // Buscamos patrones como "10 cambios", "10 vel", "10 sp" O números sueltos pequeños (3-9).
-    // Esto se hace ANTES de procesar años para que "10" no se convierta en "2010".
-    
+    // 1. DETECCIÓN DE VELOCIDAD (Prioridad Alta)
+    // Busca números 3-10 seguidos de "cambios/vel" O números 3-9 sueltos.
     let userSpeed = null;
     let queryWithoutSpeed = userQuery;
 
-    // A. Búsqueda explícita (número + palabra clave)
     const explicitSpeedRegex = /\b(\d{1,2})\s*(cambios|cambio|velocidades|velocidad|vel|marchas|sp|speed)\b/i;
     const explicitMatch = userQuery.match(explicitSpeedRegex);
 
     if (explicitMatch) {
-        userSpeed = explicitMatch[1]; // Captura el número (ej: "10")
-        // Removemos "10 cambios" del texto para que no interfiera con el año
+        userSpeed = explicitMatch[1]; 
         queryWithoutSpeed = userQuery.replace(explicitMatch[0], ' ').trim();
     } else {
-        // B. Búsqueda implícita (números 3 a 9 sueltos)
-        // Nota: No incluimos 10 suelto aquí porque podría ser año 2010. Si quieren 10 vel, deben escribir "10 cambios".
         const singleDigitRegex = /\b([3-9])\b/;
         const singleMatch = userQuery.match(singleDigitRegex);
         if (singleMatch) {
@@ -92,7 +86,7 @@ export default async function handler(request, response) {
         }
     }
 
-    // --- 2. EXPANSIÓN DE AÑOS (SOBRE EL TEXTO SIN VELOCIDAD) ---
+    // 2. EXPANSIÓN DE AÑOS
     const expandedQuery = queryWithoutSpeed.replace(/\b(\d{2})\b/g, (match) => {
         const n = parseInt(match, 10);
         if (n >= 80 && n <= 99) return `19${match}`;
@@ -100,31 +94,29 @@ export default async function handler(request, response) {
         return match;
     });
 
-    // --- 3. DETECCIÓN DE AÑO ---
+    // 3. DETECCIÓN DE AÑO
     const yearRegex = /\b(19|20)\d{2}\b/;
     const yearMatch = expandedQuery.match(yearRegex);
     const userYear = yearMatch ? yearMatch[0] : null;
 
-    // --- 4. LIMPIEZA FINAL DE TEXTO ---
+    // 4. LIMPIEZA FINAL DE TEXTO
     let textQuery = expandedQuery;
     if (userYear) textQuery = textQuery.replace(userYear, '').trim();
     
     const stopWords = ['cambios', 'cambio', 'velocidades', 'velocidad', 'vel', 'marchas', 'transmision', 'caja', 'automatico', 'automatica'];
     let queryParts = textQuery.toLowerCase().split(' ').filter(part => part.length > 0 && !stopWords.includes(part));
 
-    // --- ESTRATEGIA DE BÚSQUEDA ---
     let candidates = [];
     let searchMode = ""; 
 
-    // Función auxiliar de filtrado de velocidad
+    // Función auxiliar de velocidad
     const matchesSpeed = (item) => {
         if (!userSpeed) return true;
         const type = (item['Trans Type'] || "").toUpperCase();
-        // Busca "10 SP", "10SP", "10 SPEED"
         return type.includes(`${userSpeed} SP`) || type.includes(`${userSpeed}SP`) || type.includes(`${userSpeed} SPEED`);
     };
 
-    // NIVEL A: Exacto (Nombre + Año + Velocidad)
+    // NIVEL A: Exacto
     if (userYear) {
         candidates = transmissionData.filter(item => {
             const itemText = `${item.Make} ${item.Model} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
@@ -135,7 +127,7 @@ export default async function handler(request, response) {
         if (candidates.length > 0) searchMode = "EXACT_YEAR";
     }
 
-    // NIVEL B: General (Solo Nombre + Velocidad)
+    // NIVEL B: General
     if (candidates.length === 0) {
         candidates = transmissionData.filter(item => {
             const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
@@ -157,7 +149,7 @@ export default async function handler(request, response) {
             ACTÚA COMO: API JSON de corrección.
             LISTA VÁLIDA: [${uniqueModelsStr}]
             BÚSQUEDA USUARIO: "${textQuery}"
-            TAREA: Encuentra el nombre más parecido (ignora años).
+            TAREA: Encuentra el nombre más parecido.
             FORMATO JSON: { "found": true, "suggestion": "Jeep Liberty" }
         `;
         try {
@@ -175,7 +167,6 @@ export default async function handler(request, response) {
                 let replyText = `No encontré coincidencias. ¿Quisiste decir <b>${parsed.suggestion}</b>?`;
                 let cleanSugg = parsed.suggestion;
                 
-                // Agregamos año y velocidad a la sugerencia para reintentar completo
                 if (userYear) cleanSugg += ` ${userYear}`;
                 if (userSpeed) cleanSugg += ` ${userSpeed} cambios`;
 
@@ -191,12 +182,21 @@ export default async function handler(request, response) {
     const contextForAI = JSON.stringify(finalCandidates);
     let prompt = "";
 
+    // --- REGLAS BASE ACTUALIZADAS (DOBLE CLUTCH) ---
     const baseRules = `
         REGLAS DE AGRUPACIÓN (INTELIGENTE):
         1. SI EL CÓDIGO ES IDÉNTICO: FUSIÓNALOS en una línea y lista sus motores.
-        2. SI EL CÓDIGO ES DIFERENTE: SEPÁRALOS.
-        3. "AVO"/"TBD" = "Por Definir".
-        4. Si el usuario pidió ${userSpeed ? userSpeed + " Velocidades" : ""}, asegúrate de que los resultados sean de ese tipo.
+        2. SI EL CÓDIGO ES DIFERENTE: SEPÁRALOS en líneas propias.
+        
+        REGLAS DE ETIQUETADO (CRÍTICO):
+        1. Al final de la línea, indica el TIPO DE CAJA.
+        2. Si la caja es DSG, DCT, Powershift o Doble Embrague -> Escribe ÚNICAMENTE: "(Tipo: Doble Clutch)".
+        3. Si es CVT -> "(Tipo: CVT)".
+        4. Si es normal -> "(Tipo: Automática Convencional)".
+        
+        OTRAS REGLAS:
+        - "AVO"/"TBD" = "Por Definir".
+        - Si el usuario pidió ${userSpeed ? userSpeed + " Velocidades" : ""}, prioriza esos resultados.
     `;
 
     if (searchMode === "EXACT_YEAR") {
@@ -207,8 +207,8 @@ export default async function handler(request, response) {
             ${contextForAI}
             ---
             ${baseRules}
-            CONTEXTO: Datos filtrados para año ${userYear} ${userSpeed ? "y " + userSpeed + " Velocidades" : ""}.
-            Formato: [Modelo]: <b>[CODIGO]</b> ([Tipo], [Vel], [Tracción]) - [Motores]
+            CONTEXTO: Datos filtrados para año ${userYear}.
+            Formato: [Modelo]: <b>[CODIGO]</b> ([#] Vel, [Tracción]) - [Motores] [Tipo]
         `;
     } else { 
         prompt = `
