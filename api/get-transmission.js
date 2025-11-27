@@ -5,7 +5,7 @@ let uniqueModelsStr = "";
 let dataLoaded = false;
 let lastLoadTime = 0;
 
-// --- MOTOR MATEMÁTICO ---
+// --- MOTOR MATEMÁTICO DE AÑOS ---
 function isYearInRange(rangeStr, targetYearStr) {
     if (!rangeStr || !targetYearStr) return false;
     const target = parseInt(targetYearStr, 10);
@@ -36,8 +36,10 @@ async function loadData() {
             const response = await fetch(DATA_URL);
             if (!response.ok) throw new Error('Error GitHub Raw.');
             transmissionData = await response.json();
+            
             const modelSet = new Set(transmissionData.map(item => `${item.Make} ${item.Model}`));
             uniqueModelsStr = Array.from(modelSet).join(", ");
+
             dataLoaded = true;
             lastLoadTime = now;
             console.log(`BD Actualizada: ${transmissionData.length} registros.`);
@@ -64,12 +66,29 @@ export default async function handler(request, response) {
     const userQuery = request.body.query;
     if (!userQuery) return response.status(400).json({ reply: "Ingresa un vehículo." });
     
+    // 1. Expansión de Años
+    const expandedQuery = userQuery.replace(/\b(\d{2})\b/g, (match) => {
+        const n = parseInt(match, 10);
+        if (n >= 80 && n <= 99) return `19${match}`;
+        if (n >= 0 && n <= 30) return `20${match}`;
+        return match;
+    });
+
+    // 2. Detección de Año
     const yearRegex = /\b(19|20)\d{2}\b/;
-    const yearMatch = userQuery.match(yearRegex);
+    const yearMatch = expandedQuery.match(yearRegex);
     const userYear = yearMatch ? yearMatch[0] : null;
 
-    let textQuery = userQuery;
+    // 3. DETECCIÓN DE VELOCIDADES (NUEVO)
+    // Buscamos un número del 3 al 9 que no sea parte del año
+    const speedRegex = /\b([3-9]|10)\b/; 
+    const speedMatch = expandedQuery.match(speedRegex);
+    const userSpeed = speedMatch ? speedMatch[0] : null;
+
+    // 4. Limpieza de Texto
+    let textQuery = expandedQuery;
     if (userYear) textQuery = textQuery.replace(userYear, '').trim();
+    if (userSpeed) textQuery = textQuery.replace(userSpeed, '').trim(); // Quitamos el número de velocidad también
     
     const stopWords = ['cambios', 'cambio', 'velocidades', 'velocidad', 'vel', 'marchas', 'transmision', 'caja', 'automatico', 'automatica'];
     let queryParts = textQuery.toLowerCase().split(' ').filter(part => part.length > 0 && !stopWords.includes(part));
@@ -77,37 +96,50 @@ export default async function handler(request, response) {
     let candidates = [];
     let searchMode = ""; 
 
-    // Nivel A: Exacto
+    // --- ESTRATEGIA DE FILTRADO ---
+    
+    // Función auxiliar para filtrar por velocidad
+    const matchesSpeed = (item) => {
+        if (!userSpeed) return true; // Si no pidió velocidad, pasan todos
+        // Buscamos "4 SP", "4SP", "4 Speed" en la columna Trans Type
+        const type = item['Trans Type'] || "";
+        return type.includes(`${userSpeed} SP`) || type.includes(`${userSpeed}SP`);
+    };
+
+    // NIVEL A: Exacto (Nombre + Año + Velocidad)
     if (userYear) {
         candidates = transmissionData.filter(item => {
             const itemText = `${item.Make} ${item.Model} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
-            return queryParts.every(word => itemText.includes(word)) && isYearInRange(item.Years, userYear);
+            return queryParts.every(word => itemText.includes(word)) && 
+                   isYearInRange(item.Years, userYear) &&
+                   matchesSpeed(item); // <--- FILTRO DE VELOCIDAD
         });
         if (candidates.length > 0) searchMode = "EXACT_YEAR";
     }
 
-    // Nivel B: General
+    // NIVEL B: General (Solo Nombre + Velocidad)
     if (candidates.length === 0) {
         candidates = transmissionData.filter(item => {
             const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
-            return queryParts.every(word => itemText.includes(word));
+            return queryParts.every(word => itemText.includes(word)) &&
+                   matchesSpeed(item); // <--- FILTRO DE VELOCIDAD
         });
         if (candidates.length > 0) searchMode = "ALL_YEARS";
     }
 
-    // Nivel C: Corrector
+    // NIVEL C: Corrector
     if (candidates.length === 0) searchMode = "SPELL_CHECK";
 
     const API_KEY = process.env.GEMINI_API_KEY;
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
-    // --- 1. CORRECTOR ---
+    // ... (El bloque de SPELL_CHECK se mantiene igual) ...
     if (searchMode === "SPELL_CHECK") {
         const correctionPrompt = `
             ACTÚA COMO: API JSON de corrección.
             LISTA VÁLIDA: [${uniqueModelsStr}]
             BÚSQUEDA USUARIO: "${textQuery}"
-            TAREA: Encuentra el nombre más parecido (ignora años).
+            TAREA: Encuentra el nombre más parecido.
             FORMATO JSON: { "found": true, "suggestion": "Jeep Liberty" }
         `;
         try {
@@ -125,8 +157,6 @@ export default async function handler(request, response) {
                 let replyText = `No encontré coincidencias. ¿Quisiste decir <b>${parsed.suggestion}</b>?`;
                 let cleanSugg = parsed.suggestion;
                 
-                // REBOTE DE AÑO MEJORADO
-                // Si la sugerencia + el año existen, mandamos la sugerencia completa
                 if (userYear) {
                      const existsMath = transmissionData.some(item => {
                         const str = `${item.Make} ${item.Model}`.toLowerCase();
@@ -135,7 +165,6 @@ export default async function handler(request, response) {
                     if (existsMath) {
                         cleanSugg += ` ${userYear}`;
                     } else {
-                        // Si no existe, mandamos sugerencia SIN año para que entre a ALL_YEARS
                         replyText = `El modelo existe, pero no el año ${userYear}. ¿Quisiste decir <b>${parsed.suggestion}</b> (Ver todos los años)?`;
                     }
                 }
@@ -147,26 +176,17 @@ export default async function handler(request, response) {
     }
 
     // --- 2. BÚSQUEDA NORMAL ---
-    // Subimos a 300 para asegurar que entren todos los Jettas y Accords
     const finalCandidates = candidates.slice(0, 300); 
     const contextForAI = JSON.stringify(finalCandidates);
     let prompt = "";
 
-    // Reglas Base - AQUÍ ESTÁ LA NUEVA LÓGICA DE AGRUPACIÓN
+    // Reglas Base
     const baseRules = `
         REGLAS DE AGRUPACIÓN (INTELIGENTE):
-        1. OBJETIVO: Generar una lista limpia y concisa, pero COMPLETA.
-        2. SI EL CÓDIGO ES IDÉNTICO (Ej: "01M" aparece 5 veces con motores 1.8, 2.0, 1.9):
-           - ¡AGRÚPALOS! Genera UNA sola línea.
-           - Lista los motores: "Motores: 1.8L, 2.0L, 1.9L".
-        3. SI EL CÓDIGO ES DIFERENTE (Ej: "096", "01M", "AG4", "JF506E"):
-           - ¡SEPÁRALOS! Cada código distinto DEBE tener su propia línea.
-           - NO omitas ninguno. Si hay 4 códigos distintos, quiero 4 líneas.
-        
-        REGLAS DE FORMATO:
-        1. Formato: <b>CODIGO</b> ([Tipo], [Vel], [Tracción]) - [Lista de Motores]
-        2. "AVO"/"TBD" = "Por Definir".
-        3. Tecnología: Indica (CVT / DSG / Automática Convencional).
+        1. SI EL CÓDIGO ES IDÉNTICO: FUSIÓNALOS en una línea y lista sus motores.
+        2. SI EL CÓDIGO ES DIFERENTE: SEPÁRALOS.
+        3. "AVO"/"TBD" = "Por Definir".
+        4. Si el usuario pidió ${userSpeed ? userSpeed + " Velocidades" : ""}, ASEGÚRATE de que los resultados coincidan.
     `;
 
     if (searchMode === "EXACT_YEAR") {
@@ -177,8 +197,8 @@ export default async function handler(request, response) {
             ${contextForAI}
             ---
             ${baseRules}
-            CONTEXTO: Datos ya filtrados matemáticamente para el año ${userYear}.
-            TAREA: Lista todas las transmisiones únicas disponibles para este año. Agrupa por código.
+            CONTEXTO: Datos filtrados para año ${userYear} ${userSpeed ? "y " + userSpeed + " Velocidades" : ""}.
+            Formato: [Modelo]: <b>[CODIGO]</b> ([Tipo], [Vel], [Tracción]) - [Motores]
         `;
     } else { 
         prompt = `
@@ -208,31 +228,6 @@ export default async function handler(request, response) {
         const data = await geminiResponse.json();
         let textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "Sin datos.";
         
-        // --- ESCUDO ANTI-JSON ---
-        try {
-            const jsonMatch = textResponse.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
-            if (jsonMatch) {
-                const possibleJson = JSON.parse(jsonMatch[0]);
-                let rebuiltHtml = "";
-                let items = Array.isArray(possibleJson) ? possibleJson : (possibleJson.resultados || possibleJson.results || []);
-                if (!Array.isArray(items) && typeof items === 'object') items = [items];
-
-                if (Array.isArray(items) && items.length > 0) {
-                    items.forEach(item => {
-                        const modelo = item.modelo || item.model || "Vehículo";
-                        const codigo = item.codigo || item.code || "???";
-                        const tech = item.tecnologia || item.technology || "";
-                        const specs = item.motor || item.engine || "";
-                        const traccion = item.traccion || item.drive || "";
-                        rebuiltHtml += `- ${modelo}: <b>${codigo}</b> (${tech}, ${traccion}) - ${specs}<br>`;
-                    });
-                    if (possibleJson.nota) rebuiltHtml = `<p><i>${possibleJson.nota}</i></p>` + rebuiltHtml;
-                    textResponse = rebuiltHtml;
-                }
-            }
-        } catch (e) {}
-
-        // --- LIMPIEZA FINAL ---
         textResponse = textResponse.replace(/```json/g, '').replace(/```/g, '');
         
         let safeResponse = textResponse
