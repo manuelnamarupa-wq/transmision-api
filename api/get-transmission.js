@@ -66,44 +66,62 @@ export default async function handler(request, response) {
     const userQuery = request.body.query;
     if (!userQuery) return response.status(400).json({ reply: "Ingresa un vehículo." });
     
-    // 1. Expansión de Años
-    const expandedQuery = userQuery.replace(/\b(\d{2})\b/g, (match) => {
+    // --- 1. DETECCIÓN DE VELOCIDAD (PRIORIDAD ALTA) ---
+    // Buscamos patrones como "10 cambios", "10 vel", "10 sp" O números sueltos pequeños (3-9).
+    // Esto se hace ANTES de procesar años para que "10" no se convierta en "2010".
+    
+    let userSpeed = null;
+    let queryWithoutSpeed = userQuery;
+
+    // A. Búsqueda explícita (número + palabra clave)
+    const explicitSpeedRegex = /\b(\d{1,2})\s*(cambios|cambio|velocidades|velocidad|vel|marchas|sp|speed)\b/i;
+    const explicitMatch = userQuery.match(explicitSpeedRegex);
+
+    if (explicitMatch) {
+        userSpeed = explicitMatch[1]; // Captura el número (ej: "10")
+        // Removemos "10 cambios" del texto para que no interfiera con el año
+        queryWithoutSpeed = userQuery.replace(explicitMatch[0], ' ').trim();
+    } else {
+        // B. Búsqueda implícita (números 3 a 9 sueltos)
+        // Nota: No incluimos 10 suelto aquí porque podría ser año 2010. Si quieren 10 vel, deben escribir "10 cambios".
+        const singleDigitRegex = /\b([3-9])\b/;
+        const singleMatch = userQuery.match(singleDigitRegex);
+        if (singleMatch) {
+            userSpeed = singleMatch[1];
+            queryWithoutSpeed = userQuery.replace(singleMatch[0], ' ').trim();
+        }
+    }
+
+    // --- 2. EXPANSIÓN DE AÑOS (SOBRE EL TEXTO SIN VELOCIDAD) ---
+    const expandedQuery = queryWithoutSpeed.replace(/\b(\d{2})\b/g, (match) => {
         const n = parseInt(match, 10);
         if (n >= 80 && n <= 99) return `19${match}`;
         if (n >= 0 && n <= 30) return `20${match}`;
         return match;
     });
 
-    // 2. Detección de Año
+    // --- 3. DETECCIÓN DE AÑO ---
     const yearRegex = /\b(19|20)\d{2}\b/;
     const yearMatch = expandedQuery.match(yearRegex);
     const userYear = yearMatch ? yearMatch[0] : null;
 
-    // 3. DETECCIÓN DE VELOCIDADES (NUEVO)
-    // Buscamos un número del 3 al 9 que no sea parte del año
-    const speedRegex = /\b([3-9]|10)\b/; 
-    const speedMatch = expandedQuery.match(speedRegex);
-    const userSpeed = speedMatch ? speedMatch[0] : null;
-
-    // 4. Limpieza de Texto
+    // --- 4. LIMPIEZA FINAL DE TEXTO ---
     let textQuery = expandedQuery;
     if (userYear) textQuery = textQuery.replace(userYear, '').trim();
-    if (userSpeed) textQuery = textQuery.replace(userSpeed, '').trim(); // Quitamos el número de velocidad también
     
     const stopWords = ['cambios', 'cambio', 'velocidades', 'velocidad', 'vel', 'marchas', 'transmision', 'caja', 'automatico', 'automatica'];
     let queryParts = textQuery.toLowerCase().split(' ').filter(part => part.length > 0 && !stopWords.includes(part));
 
+    // --- ESTRATEGIA DE BÚSQUEDA ---
     let candidates = [];
     let searchMode = ""; 
 
-    // --- ESTRATEGIA DE FILTRADO ---
-    
-    // Función auxiliar para filtrar por velocidad
+    // Función auxiliar de filtrado de velocidad
     const matchesSpeed = (item) => {
-        if (!userSpeed) return true; // Si no pidió velocidad, pasan todos
-        // Buscamos "4 SP", "4SP", "4 Speed" en la columna Trans Type
-        const type = item['Trans Type'] || "";
-        return type.includes(`${userSpeed} SP`) || type.includes(`${userSpeed}SP`);
+        if (!userSpeed) return true;
+        const type = (item['Trans Type'] || "").toUpperCase();
+        // Busca "10 SP", "10SP", "10 SPEED"
+        return type.includes(`${userSpeed} SP`) || type.includes(`${userSpeed}SP`) || type.includes(`${userSpeed} SPEED`);
     };
 
     // NIVEL A: Exacto (Nombre + Año + Velocidad)
@@ -112,7 +130,7 @@ export default async function handler(request, response) {
             const itemText = `${item.Make} ${item.Model} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
             return queryParts.every(word => itemText.includes(word)) && 
                    isYearInRange(item.Years, userYear) &&
-                   matchesSpeed(item); // <--- FILTRO DE VELOCIDAD
+                   matchesSpeed(item);
         });
         if (candidates.length > 0) searchMode = "EXACT_YEAR";
     }
@@ -122,7 +140,7 @@ export default async function handler(request, response) {
         candidates = transmissionData.filter(item => {
             const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
             return queryParts.every(word => itemText.includes(word)) &&
-                   matchesSpeed(item); // <--- FILTRO DE VELOCIDAD
+                   matchesSpeed(item);
         });
         if (candidates.length > 0) searchMode = "ALL_YEARS";
     }
@@ -133,13 +151,13 @@ export default async function handler(request, response) {
     const API_KEY = process.env.GEMINI_API_KEY;
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
-    // ... (El bloque de SPELL_CHECK se mantiene igual) ...
+    // --- 1. CORRECTOR ---
     if (searchMode === "SPELL_CHECK") {
         const correctionPrompt = `
             ACTÚA COMO: API JSON de corrección.
             LISTA VÁLIDA: [${uniqueModelsStr}]
             BÚSQUEDA USUARIO: "${textQuery}"
-            TAREA: Encuentra el nombre más parecido.
+            TAREA: Encuentra el nombre más parecido (ignora años).
             FORMATO JSON: { "found": true, "suggestion": "Jeep Liberty" }
         `;
         try {
@@ -157,17 +175,10 @@ export default async function handler(request, response) {
                 let replyText = `No encontré coincidencias. ¿Quisiste decir <b>${parsed.suggestion}</b>?`;
                 let cleanSugg = parsed.suggestion;
                 
-                if (userYear) {
-                     const existsMath = transmissionData.some(item => {
-                        const str = `${item.Make} ${item.Model}`.toLowerCase();
-                        return parsed.suggestion.toLowerCase().split(' ').every(w => str.includes(w)) && isYearInRange(item.Years, userYear);
-                    });
-                    if (existsMath) {
-                        cleanSugg += ` ${userYear}`;
-                    } else {
-                        replyText = `El modelo existe, pero no el año ${userYear}. ¿Quisiste decir <b>${parsed.suggestion}</b> (Ver todos los años)?`;
-                    }
-                }
+                // Agregamos año y velocidad a la sugerencia para reintentar completo
+                if (userYear) cleanSugg += ` ${userYear}`;
+                if (userSpeed) cleanSugg += ` ${userSpeed} cambios`;
+
                 return response.status(200).json({ reply: replyText, suggestion: cleanSugg });
             } else {
                 return response.status(200).json({ reply: `No se encontraron coincidencias.` });
@@ -180,13 +191,12 @@ export default async function handler(request, response) {
     const contextForAI = JSON.stringify(finalCandidates);
     let prompt = "";
 
-    // Reglas Base
     const baseRules = `
         REGLAS DE AGRUPACIÓN (INTELIGENTE):
         1. SI EL CÓDIGO ES IDÉNTICO: FUSIÓNALOS en una línea y lista sus motores.
         2. SI EL CÓDIGO ES DIFERENTE: SEPÁRALOS.
         3. "AVO"/"TBD" = "Por Definir".
-        4. Si el usuario pidió ${userSpeed ? userSpeed + " Velocidades" : ""}, ASEGÚRATE de que los resultados coincidan.
+        4. Si el usuario pidió ${userSpeed ? userSpeed + " Velocidades" : ""}, asegúrate de que los resultados sean de ese tipo.
     `;
 
     if (searchMode === "EXACT_YEAR") {
