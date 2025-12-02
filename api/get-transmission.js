@@ -5,7 +5,7 @@ let uniqueModelsStr = "";
 let dataLoaded = false;
 let lastLoadTime = 0;
 
-// --- MOTOR MATEMÁTICO DE AÑOS ---
+// --- MOTOR MATEMÁTICO ---
 function isYearInRange(rangeStr, targetYearStr) {
     if (!rangeStr || !targetYearStr) return false;
     const target = parseInt(targetYearStr, 10);
@@ -36,10 +36,8 @@ async function loadData() {
             const response = await fetch(DATA_URL);
             if (!response.ok) throw new Error('Error GitHub Raw.');
             transmissionData = await response.json();
-            
             const modelSet = new Set(transmissionData.map(item => `${item.Make} ${item.Model}`));
             uniqueModelsStr = Array.from(modelSet).join(", ");
-
             dataLoaded = true;
             lastLoadTime = now;
             console.log(`BD Actualizada: ${transmissionData.length} registros.`);
@@ -66,11 +64,9 @@ export default async function handler(request, response) {
     const userQuery = request.body.query;
     if (!userQuery) return response.status(400).json({ reply: "Ingresa un vehículo." });
     
-    // 1. DETECCIÓN DE VELOCIDAD (Prioridad Alta)
-    // Busca números 3-10 seguidos de "cambios/vel" O números 3-9 sueltos.
+    // 1. Detección de Velocidad (Prioridad)
     let userSpeed = null;
     let queryWithoutSpeed = userQuery;
-
     const explicitSpeedRegex = /\b(\d{1,2})\s*(cambios|cambio|velocidades|velocidad|vel|marchas|sp|speed)\b/i;
     const explicitMatch = userQuery.match(explicitSpeedRegex);
 
@@ -86,7 +82,7 @@ export default async function handler(request, response) {
         }
     }
 
-    // 2. EXPANSIÓN DE AÑOS
+    // 2. Expansión de Años
     const expandedQuery = queryWithoutSpeed.replace(/\b(\d{2})\b/g, (match) => {
         const n = parseInt(match, 10);
         if (n >= 80 && n <= 99) return `19${match}`;
@@ -94,12 +90,11 @@ export default async function handler(request, response) {
         return match;
     });
 
-    // 3. DETECCIÓN DE AÑO
+    // 3. Detección de Año
     const yearRegex = /\b(19|20)\d{2}\b/;
     const yearMatch = expandedQuery.match(yearRegex);
     const userYear = yearMatch ? yearMatch[0] : null;
 
-    // 4. LIMPIEZA FINAL DE TEXTO
     let textQuery = expandedQuery;
     if (userYear) textQuery = textQuery.replace(userYear, '').trim();
     
@@ -143,7 +138,7 @@ export default async function handler(request, response) {
     const API_KEY = process.env.GEMINI_API_KEY;
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
-    // --- 1. CORRECTOR ---
+    // --- 1. LÓGICA DEL CORRECTOR ---
     if (searchMode === "SPELL_CHECK") {
         const correctionPrompt = `
             ACTÚA COMO: API JSON de corrección.
@@ -164,10 +159,29 @@ export default async function handler(request, response) {
             const parsed = JSON.parse(rawText);
 
             if (parsed.found && parsed.suggestion) {
-                let replyText = `No encontré coincidencias. ¿Quisiste decir <b>${parsed.suggestion}</b>?`;
-                let cleanSugg = parsed.suggestion;
+                let cleanSugg = parsed.suggestion; // Solo el nombre (Ej: Jeep Liberty)
+                let replyText = "";
                 
-                if (userYear) cleanSugg += ` ${userYear}`;
+                // LÓGICA INTELIGENTE DE AÑO:
+                if (userYear) {
+                     const existsMath = transmissionData.some(item => {
+                        const str = `${item.Make} ${item.Model}`.toLowerCase();
+                        return parsed.suggestion.toLowerCase().split(' ').every(w => str.includes(w)) && isYearInRange(item.Years, userYear);
+                    });
+                    
+                    if (existsMath) {
+                        // SI EXISTE EN ESE AÑO: Sugerimos el nombre + año.
+                        cleanSugg += ` ${userYear}`;
+                        replyText = `¿Quisiste decir <b>${cleanSugg}</b>?`;
+                    } else {
+                        // SI NO EXISTE EN ESE AÑO: Sugerimos SOLO EL NOMBRE (sin el año incorrecto).
+                        // Esto fuerza a que la siguiente búsqueda entre en "ALL_YEARS" y muestre el catálogo.
+                        replyText = `El modelo existe, pero no encontré año ${userYear}. ¿Quisiste decir <b>${cleanSugg}</b> (Ver todos los años)?`;
+                    }
+                } else {
+                    replyText = `¿Quisiste decir <b>${cleanSugg}</b>?`;
+                }
+
                 if (userSpeed) cleanSugg += ` ${userSpeed} cambios`;
 
                 return response.status(200).json({ reply: replyText, suggestion: cleanSugg });
@@ -182,26 +196,19 @@ export default async function handler(request, response) {
     const contextForAI = JSON.stringify(finalCandidates);
     let prompt = "";
 
-    // --- REGLAS BASE ACTUALIZADAS (DOBLE CLUTCH) ---
     const baseRules = `
         REGLAS DE AGRUPACIÓN (INTELIGENTE):
         1. SI EL CÓDIGO ES IDÉNTICO: FUSIÓNALOS en una línea y lista sus motores.
-        2. SI EL CÓDIGO ES DIFERENTE: SEPÁRALOS en líneas propias.
+        2. SI EL CÓDIGO ES DIFERENTE: SEPÁRALOS.
         
-        REGLAS DE ETIQUETADO (CRÍTICO):
-        1. Al final de la línea, indica el TIPO DE CAJA.
-        2. Si la caja es DSG, DCT, Powershift o Doble Embrague -> Escribe ÚNICAMENTE: "(Tipo: Doble Clutch)".
-        3. Si es CVT -> "(Tipo: CVT)".
-        4. Si es normal -> "(Tipo: Automática Convencional)".
-        
-        OTRAS REGLAS:
-        - "AVO"/"TBD" = "Por Definir".
-        - Si el usuario pidió ${userSpeed ? userSpeed + " Velocidades" : ""}, prioriza esos resultados.
+        REGLAS DE ETIQUETADO:
+        1. Al final, clasifica: (Tipo: Doble Clutch), (Tipo: CVT) o (Tipo: Automática Convencional).
+        2. "AVO"/"TBD" = "Por Definir".
     `;
 
     if (searchMode === "EXACT_YEAR") {
         prompt = `
-            [SYSTEM: STRICT FORMATTER. OUTPUT TEXT ONLY. NO JSON.]
+            [SYSTEM: STRICT FORMATTER. OUTPUT TEXT ONLY.]
             DATOS (JSON):
             ---
             ${contextForAI}
@@ -211,17 +218,23 @@ export default async function handler(request, response) {
             Formato: [Modelo]: <b>[CODIGO]</b> ([#] Vel, [Tracción]) - [Motores] [Tipo]
         `;
     } else { 
+        // MODO GENERAL (Aquí estaba el problema de los links en autos)
         prompt = `
-            [SYSTEM: STRICT FORMATTER. OUTPUT TEXT ONLY. NO JSON.]
+            [SYSTEM: STRICT FORMATTER. OUTPUT TEXT ONLY.]
             CONTEXTO: Catálogo general para "${userQuery}".
             DATOS (JSON):
             ---
             ${contextForAI}
             ---
             ${baseRules}
-            REGLAS VISUALES:
-            1. ¡SOLO pon en negritas <b> el CÓDIGO!
-            2. Nota de Año: Si el usuario pidió año ${userYear || "N/A"} y no está, pon nota al inicio.
+            
+            REGLAS VISUALES OBLIGATORIAS:
+            1. ¡ÚNICAMENTE pon en negritas <b> el CÓDIGO DE TRANSMISIÓN!
+            2. PROHIBIDO poner en negritas el nombre del auto, el año o el motor.
+            3. ERROR GRAVE: "<b>Jeep Liberty</b>". -> ESTO ROMPE EL SISTEMA.
+            4. CORRECTO: "Jeep Liberty: <b>42RLE</b>..."
+            
+            Nota de Año: Si pidieron año ${userYear || "N/A"} y no está, inicia con: "No encontré año ${userYear}, mostrando cercanos:".
         `;
     }
 
