@@ -32,9 +32,9 @@ function isYearInRange(rangeStr, targetYearStr) {
     return target === single;
 }
 
-// Función para aplanar texto (quita todo lo que no sea letra/número)
-function normalize(str) {
-    return str.toLowerCase().replace(/[^a-z0-9]/g, '');
+// Función simple para normalizar texto (guiones a espacios)
+function normalizeText(str) {
+    return str.toLowerCase().replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 async function loadData() {
@@ -105,25 +105,15 @@ export default async function handler(request, response) {
     const yearMatch = expandedQuery.match(yearRegex);
     const userYear = yearMatch ? yearMatch[0] : null;
 
-    // 4. Limpieza de Texto
+    // 4. Limpieza Simple
     let textQuery = expandedQuery;
     if (userYear) textQuery = textQuery.replace(userYear, '').trim();
     
+    // Normalizamos la búsqueda (guiones -> espacios)
+    const normalizedQuery = normalizeText(textQuery);
+    
     const stopWords = ['cambios', 'cambio', 'velocidades', 'velocidad', 'vel', 'marchas', 'transmision', 'caja', 'automatico', 'automatica'];
-    
-    // PREPARACIÓN DE BÚSQUEDA
-    // A. Versión comprimida "CX9"
-    const flatQuery = normalize(textQuery);
-    
-    // B. Versión separada ["cx", "9"]
-    let queryParts = textQuery.toLowerCase().split(' ').filter(part => part.length > 0 && !stopWords.includes(part));
-
-    // C. DETECCIÓN DE TIPO DE BÚSQUEDA (HÍBRIDA)
-    // ¿El texto tiene Letras Y Números? (Ej: CX-9, F-150, 4L60) -> ESTRICTO
-    // ¿El texto tiene Solo Letras? (Ej: Jetta, Bora) -> FLEXIBLE
-    const hasNumbers = /\d/.test(flatQuery);
-    const hasLetters = /[a-z]/.test(flatQuery);
-    const isAlphanumeric = hasNumbers && hasLetters;
+    let queryParts = normalizedQuery.split(' ').filter(part => part.length > 0 && !stopWords.includes(part));
 
     let candidates = [];
     let searchMode = ""; 
@@ -135,21 +125,13 @@ export default async function handler(request, response) {
         return type.includes(`${userSpeed} SP`) || type.includes(`${userSpeed}SP`) || type.includes(`${userSpeed} SPEED`);
     };
 
-    // --- FILTRADO INTELIGENTE ---
+    // --- FILTRADO BÁSICO (SIMPLE Y ROBUSTO) ---
     const filterLogic = (item) => {
-        const rawItemText = `${item.Make} ${item.Model} ${item['Trans Type']} ${item['Engine Type / Size']}`;
-        const flatItemText = normalize(rawItemText);
-
-        if (isAlphanumeric) {
-            // MODO ESTRICTO (Para CX-9, F-150)
-            // Exigimos que la cadena comprimida EXACTA (cx9) esté dentro de la data (mazdacx9).
-            // Esto mata al Cadillac (que tiene 9 y X pero no "cx9" junto).
-            return flatItemText.includes(flatQuery);
-        } else {
-            // MODO FLEXIBLE (Para Jetta, Bora)
-            // Permitimos coincidencia por palabras sueltas.
-            return queryParts.every(part => flatItemText.includes(normalize(part)));
-        }
+        // Normalizamos también el texto de la base de datos (guiones -> espacios)
+        const itemText = normalizeText(`${item.Make} ${item.Model} ${item['Trans Type']} ${item['Engine Type / Size']}`);
+        
+        // Verificamos si TODAS las palabras del usuario están presentes
+        return queryParts.every(word => itemText.includes(word));
     };
 
     // NIVEL A: Exacto
@@ -168,7 +150,7 @@ export default async function handler(request, response) {
         if (candidates.length > 0) searchMode = "ALL_YEARS";
     }
 
-    // NIVEL C: Corrector
+    // NIVEL C: Corrector (Aquí entra la IA si escribiste CX9 en vez de CX-9)
     if (candidates.length === 0) searchMode = "SPELL_CHECK";
 
     const API_KEY = process.env.GEMINI_API_KEY;
@@ -180,7 +162,7 @@ export default async function handler(request, response) {
             ACTÚA COMO: API JSON de corrección.
             LISTA VÁLIDA: [${uniqueModelsStr}]
             BÚSQUEDA USUARIO: "${textQuery}"
-            TAREA: Encuentra el nombre más parecido.
+            TAREA: Encuentra el nombre más parecido (ignora años).
             FORMATO JSON: { "found": true, "suggestion": "Jeep Liberty" }
         `;
         try {
@@ -195,22 +177,15 @@ export default async function handler(request, response) {
             const parsed = JSON.parse(rawText);
 
             if (parsed.found && parsed.suggestion) {
-                let replyText = `No encontré coincidencias. ¿Quisiste decir <b>${parsed.suggestion}</b>?`;
+                let replyText = `No encontré coincidencias exactas. ¿Quisiste decir <b>${parsed.suggestion}</b>?`;
                 let cleanSugg = parsed.suggestion;
                 
                 if (userYear) {
-                     // Check de existencia
+                     // Check de existencia simple
                      const existsMath = transmissionData.some(item => {
-                        const str = `${item.Make} ${item.Model}`.toLowerCase();
-                        // Usamos la misma lógica híbrida para verificar la sugerencia
-                        const flatStr = normalize(str);
-                        const flatSugg = normalize(parsed.suggestion);
-                        const isSuggAlpha = /\d/.test(flatSugg) && /[a-z]/.test(flatSugg);
-                        
-                        let matchesName = false;
-                        if(isSuggAlpha) matchesName = flatStr.includes(flatSugg);
-                        else matchesName = parsed.suggestion.split(' ').every(p => flatStr.includes(normalize(p)));
-
+                        const str = normalizeText(`${item.Make} ${item.Model}`);
+                        const suggParts = normalizeText(parsed.suggestion).split(' ');
+                        const matchesName = suggParts.every(w => str.includes(w));
                         return matchesName && isYearInRange(item.Years, userYear);
                     });
                     
