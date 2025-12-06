@@ -1,3 +1,4 @@
+
 const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmision-api/main/api/transmissions.json';
 
 let transmissionData = [];
@@ -5,12 +6,13 @@ let uniqueModelsStr = "";
 let dataLoaded = false;
 let lastLoadTime = 0;
 
-// --- MOTOR MATEMÁTICO ---
+// --- MOTOR MATEMÁTICO DE AÑOS ---
 function isYearInRange(rangeStr, targetYearStr) {
     if (!rangeStr || !targetYearStr) return false;
     const target = parseInt(targetYearStr, 10);
     let cleanRange = rangeStr.replace(/\s/g, '').toUpperCase();
     
+    // Caso: "98-02"
     if (cleanRange.includes('-') && !cleanRange.includes('UP')) {
         const parts = cleanRange.split('-');
         let start = parseInt(parts[0], 10);
@@ -19,11 +21,13 @@ function isYearInRange(rangeStr, targetYearStr) {
         if (end < 100) end += (end > 50 ? 1900 : 2000);
         return target >= start && target <= end;
     }
+    // Caso: "99-UP"
     if (cleanRange.includes('UP') || cleanRange.includes('+')) {
         let start = parseInt(cleanRange.replace('UP','').replace('+','').replace('-',''), 10);
         if (start < 100) start += (start > 50 ? 1900 : 2000);
         return target >= start;
     }
+    // Caso: Año único
     let single = parseInt(cleanRange, 10);
     if (single < 100) single += (single > 50 ? 1900 : 2000);
     return target === single;
@@ -36,8 +40,10 @@ async function loadData() {
             const response = await fetch(DATA_URL);
             if (!response.ok) throw new Error('Error GitHub Raw.');
             transmissionData = await response.json();
+            
             const modelSet = new Set(transmissionData.map(item => `${item.Make} ${item.Model}`));
             uniqueModelsStr = Array.from(modelSet).join(", ");
+
             dataLoaded = true;
             lastLoadTime = now;
             console.log(`BD Actualizada: ${transmissionData.length} registros.`);
@@ -49,6 +55,7 @@ async function loadData() {
 }
 
 export default async function handler(request, response) {
+    // Configuración CORS
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -64,9 +71,10 @@ export default async function handler(request, response) {
     const userQuery = request.body.query;
     if (!userQuery) return response.status(400).json({ reply: "Ingresa un vehículo." });
     
-    // 1. Detección de Velocidad (Prioridad)
+    // 1. Detección de Velocidad
     let userSpeed = null;
     let queryWithoutSpeed = userQuery;
+
     const explicitSpeedRegex = /\b(\d{1,2})\s*(cambios|cambio|velocidades|velocidad|vel|marchas|sp|speed)\b/i;
     const explicitMatch = userQuery.match(explicitSpeedRegex);
 
@@ -95,9 +103,13 @@ export default async function handler(request, response) {
     const yearMatch = expandedQuery.match(yearRegex);
     const userYear = yearMatch ? yearMatch[0] : null;
 
+    // 4. Limpieza Final de Texto
     let textQuery = expandedQuery;
     if (userYear) textQuery = textQuery.replace(userYear, '').trim();
     
+    // Convertimos guiones del usuario en espacios para facilitar la búsqueda (CX-9 -> CX 9)
+    textQuery = textQuery.replace(/-/g, ' ');
+
     const stopWords = ['cambios', 'cambio', 'velocidades', 'velocidad', 'vel', 'marchas', 'transmision', 'caja', 'automatico', 'automatica'];
     let queryParts = textQuery.toLowerCase().split(' ').filter(part => part.length > 0 && !stopWords.includes(part));
 
@@ -111,13 +123,25 @@ export default async function handler(request, response) {
         return type.includes(`${userSpeed} SP`) || type.includes(`${userSpeed}SP`) || type.includes(`${userSpeed} SPEED`);
     };
 
+    // --- FUNCIÓN DE FILTRADO MAESTRA (SOPORTA GUIONES Y SIN GUIONES) ---
+    const filterLogic = (item) => {
+        // Texto original de la base de datos (Ej: "Mazda CX-9")
+        const itemText = `${item.Make} ${item.Model} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
+        
+        // Texto "espejo" sin guiones (Ej: "Mazda CX9")
+        // Esto permite que si el usuario busca "CX9", lo encuentre aquí.
+        const cleanItemText = itemText.replace(/-/g, '');
+
+        // Verificamos si las palabras del usuario están en el texto original O en el texto sin guiones
+        const matchesName = queryParts.every(word => itemText.includes(word) || cleanItemText.includes(word));
+        
+        return matchesName && matchesSpeed(item);
+    };
+
     // NIVEL A: Exacto
     if (userYear) {
         candidates = transmissionData.filter(item => {
-            const itemText = `${item.Make} ${item.Model} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
-            return queryParts.every(word => itemText.includes(word)) && 
-                   isYearInRange(item.Years, userYear) &&
-                   matchesSpeed(item);
+            return filterLogic(item) && isYearInRange(item.Years, userYear);
         });
         if (candidates.length > 0) searchMode = "EXACT_YEAR";
     }
@@ -125,9 +149,7 @@ export default async function handler(request, response) {
     // NIVEL B: General
     if (candidates.length === 0) {
         candidates = transmissionData.filter(item => {
-            const itemText = `${item.Make} ${item.Model} ${item.Years} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
-            return queryParts.every(word => itemText.includes(word)) &&
-                   matchesSpeed(item);
+            return filterLogic(item);
         });
         if (candidates.length > 0) searchMode = "ALL_YEARS";
     }
@@ -159,29 +181,10 @@ export default async function handler(request, response) {
             const parsed = JSON.parse(rawText);
 
             if (parsed.found && parsed.suggestion) {
-                let cleanSugg = parsed.suggestion; // Solo el nombre (Ej: Jeep Liberty)
-                let replyText = "";
+                let replyText = `No encontré coincidencias. ¿Quisiste decir <b>${parsed.suggestion}</b>?`;
+                let cleanSugg = parsed.suggestion;
                 
-                // LÓGICA INTELIGENTE DE AÑO:
-                if (userYear) {
-                     const existsMath = transmissionData.some(item => {
-                        const str = `${item.Make} ${item.Model}`.toLowerCase();
-                        return parsed.suggestion.toLowerCase().split(' ').every(w => str.includes(w)) && isYearInRange(item.Years, userYear);
-                    });
-                    
-                    if (existsMath) {
-                        // SI EXISTE EN ESE AÑO: Sugerimos el nombre + año.
-                        cleanSugg += ` ${userYear}`;
-                        replyText = `¿Quisiste decir <b>${cleanSugg}</b>?`;
-                    } else {
-                        // SI NO EXISTE EN ESE AÑO: Sugerimos SOLO EL NOMBRE (sin el año incorrecto).
-                        // Esto fuerza a que la siguiente búsqueda entre en "ALL_YEARS" y muestre el catálogo.
-                        replyText = `El modelo existe, pero no encontré año ${userYear}. ¿Quisiste decir <b>${cleanSugg}</b> (Ver todos los años)?`;
-                    }
-                } else {
-                    replyText = `¿Quisiste decir <b>${cleanSugg}</b>?`;
-                }
-
+                if (userYear) cleanSugg += ` ${userYear}`;
                 if (userSpeed) cleanSugg += ` ${userSpeed} cambios`;
 
                 return response.status(200).json({ reply: replyText, suggestion: cleanSugg });
@@ -202,39 +205,33 @@ export default async function handler(request, response) {
         2. SI EL CÓDIGO ES DIFERENTE: SEPÁRALOS.
         
         REGLAS DE ETIQUETADO:
-        1. Al final, clasifica: (Tipo: Doble Clutch), (Tipo: CVT) o (Tipo: Automática Convencional).
+        1. Indica: (Tipo: Doble Clutch), (Tipo: CVT) o (Tipo: Automática Convencional).
         2. "AVO"/"TBD" = "Por Definir".
     `;
 
     if (searchMode === "EXACT_YEAR") {
         prompt = `
-            [SYSTEM: STRICT FORMATTER. OUTPUT TEXT ONLY.]
+            [SYSTEM: STRICT FORMATTER. OUTPUT TEXT ONLY. NO JSON.]
             DATOS (JSON):
             ---
             ${contextForAI}
             ---
             ${baseRules}
-            CONTEXTO: Datos filtrados para año ${userYear}.
+            CONTEXTO: Datos filtrados para año ${userYear} ${userSpeed ? "y " + userSpeed + " Velocidades" : ""}.
             Formato: [Modelo]: <b>[CODIGO]</b> ([#] Vel, [Tracción]) - [Motores] [Tipo]
         `;
     } else { 
-        // MODO GENERAL (Aquí estaba el problema de los links en autos)
         prompt = `
-            [SYSTEM: STRICT FORMATTER. OUTPUT TEXT ONLY.]
+            [SYSTEM: STRICT FORMATTER. OUTPUT TEXT ONLY. NO JSON.]
             CONTEXTO: Catálogo general para "${userQuery}".
             DATOS (JSON):
             ---
             ${contextForAI}
             ---
             ${baseRules}
-            
-            REGLAS VISUALES OBLIGATORIAS:
-            1. ¡ÚNICAMENTE pon en negritas <b> el CÓDIGO DE TRANSMISIÓN!
-            2. PROHIBIDO poner en negritas el nombre del auto, el año o el motor.
-            3. ERROR GRAVE: "<b>Jeep Liberty</b>". -> ESTO ROMPE EL SISTEMA.
-            4. CORRECTO: "Jeep Liberty: <b>42RLE</b>..."
-            
-            Nota de Año: Si pidieron año ${userYear || "N/A"} y no está, inicia con: "No encontré año ${userYear}, mostrando cercanos:".
+            REGLAS VISUALES:
+            1. ¡SOLO pon en negritas <b> el CÓDIGO!
+            2. Nota de Año: Si el usuario pidió año ${userYear || "N/A"} y no está, pon nota al inicio.
         `;
     }
 
