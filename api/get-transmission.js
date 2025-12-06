@@ -11,7 +11,6 @@ function isYearInRange(rangeStr, targetYearStr) {
     const target = parseInt(targetYearStr, 10);
     let cleanRange = rangeStr.replace(/\s/g, '').toUpperCase();
     
-    // Caso: "98-02"
     if (cleanRange.includes('-') && !cleanRange.includes('UP')) {
         const parts = cleanRange.split('-');
         let start = parseInt(parts[0], 10);
@@ -20,16 +19,22 @@ function isYearInRange(rangeStr, targetYearStr) {
         if (end < 100) end += (end > 50 ? 1900 : 2000);
         return target >= start && target <= end;
     }
-    // Caso: "99-UP"
     if (cleanRange.includes('UP') || cleanRange.includes('+')) {
         let start = parseInt(cleanRange.replace('UP','').replace('+','').replace('-',''), 10);
         if (start < 100) start += (start > 50 ? 1900 : 2000);
         return target >= start;
     }
-    // Caso: Año único
     let single = parseInt(cleanRange, 10);
     if (single < 100) single += (single > 50 ? 1900 : 2000);
     return target === single;
+}
+
+// --- FUNCIÓN "APLANADORA" (NORMALIZACIÓN) ---
+// Elimina espacios, guiones, puntos y convierte a minúsculas.
+// "CX-9" -> "cx9"
+// "F-150" -> "f150"
+function normalize(str) {
+    return str.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
 async function loadData() {
@@ -39,8 +44,10 @@ async function loadData() {
             const response = await fetch(DATA_URL);
             if (!response.ok) throw new Error('Error GitHub Raw.');
             transmissionData = await response.json();
+            
             const modelSet = new Set(transmissionData.map(item => `${item.Make} ${item.Model}`));
             uniqueModelsStr = Array.from(modelSet).join(", ");
+
             dataLoaded = true;
             lastLoadTime = now;
             console.log(`BD Actualizada: ${transmissionData.length} registros.`);
@@ -98,15 +105,13 @@ export default async function handler(request, response) {
     const yearMatch = expandedQuery.match(yearRegex);
     const userYear = yearMatch ? yearMatch[0] : null;
 
-    // 4. LIMPIEZA INTELIGENTE (EL CAMBIO ESTÁ AQUÍ)
+    // 4. Limpieza para búsqueda
     let textQuery = expandedQuery;
     if (userYear) textQuery = textQuery.replace(userYear, '').trim();
     
-    // CAMBIO: Reemplazamos CUALQUIER símbolo (guion, punto, etc.) por un ESPACIO.
-    // "CX-9" -> "CX 9". "F-150" -> "F 150".
-    textQuery = textQuery.replace(/[^a-zA-Z0-9]/g, ' ');
-
     const stopWords = ['cambios', 'cambio', 'velocidades', 'velocidad', 'vel', 'marchas', 'transmision', 'caja', 'automatico', 'automatica'];
+    
+    // Separamos las palabras del usuario
     let queryParts = textQuery.toLowerCase().split(' ').filter(part => part.length > 0 && !stopWords.includes(part));
 
     let candidates = [];
@@ -119,11 +124,21 @@ export default async function handler(request, response) {
         return type.includes(`${userSpeed} SP`) || type.includes(`${userSpeed}SP`) || type.includes(`${userSpeed} SPEED`);
     };
 
-    // --- FILTRADO ESTÁNDAR ---
+    // --- FILTRADO APLANADOR (LA SOLUCIÓN) ---
     const filterLogic = (item) => {
-        const itemText = `${item.Make} ${item.Model} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
-        // Verificamos si TODAS las partes (ej: "cx", "9") están en el texto de la BD
-        return queryParts.every(word => itemText.includes(word));
+        const rawItemText = `${item.Make} ${item.Model} ${item['Trans Type']} ${item['Engine Type / Size']}`;
+        
+        // 1. Creamos la versión "aplanada" de la BD (sin espacios ni guiones)
+        const flatItemText = normalize(rawItemText);
+
+        // 2. Verificamos cada palabra del usuario
+        return queryParts.every(part => {
+            // Aplanamos también la palabra del usuario (ej: "CX-9" -> "cx9")
+            const flatPart = normalize(part);
+            
+            // Verificamos si la palabra aplanada existe en el texto aplanado de la BD
+            return flatItemText.includes(flatPart);
+        });
     };
 
     // NIVEL A: Exacto
@@ -148,7 +163,7 @@ export default async function handler(request, response) {
     const API_KEY = process.env.GEMINI_API_KEY;
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
-    // --- 1. LÓGICA DEL CORRECTOR ---
+    // --- 1. CORRECTOR ---
     if (searchMode === "SPELL_CHECK") {
         const correctionPrompt = `
             ACTÚA COMO: API JSON de corrección.
@@ -173,12 +188,14 @@ export default async function handler(request, response) {
                 let cleanSugg = parsed.suggestion;
                 
                 if (userYear) {
-                     // Check de existencia con año
+                     // Check de existencia usando la misma lógica aplanadora
                      const existsMath = transmissionData.some(item => {
-                        const str = `${item.Make} ${item.Model}`.toLowerCase();
-                        // Replicamos la lógica de limpieza para el chequeo
-                        const suggParts = parsed.suggestion.replace(/[^a-zA-Z0-9]/g, ' ').toLowerCase().split(' ').filter(p => p.length > 0);
-                        const matchesName = suggParts.every(w => str.includes(w));
+                        const rawItemText = `${item.Make} ${item.Model}`;
+                        const flatItemText = normalize(rawItemText);
+                        
+                        const suggParts = parsed.suggestion.split(' ');
+                        const matchesName = suggParts.every(part => flatItemText.includes(normalize(part)));
+                        
                         return matchesName && isYearInRange(item.Years, userYear);
                     });
                     
