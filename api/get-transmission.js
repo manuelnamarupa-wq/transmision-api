@@ -5,7 +5,7 @@ let uniqueModelsStr = "";
 let dataLoaded = false;
 let lastLoadTime = 0;
 
-// --- MOTOR MATEMÁTICO DE AÑOS ---
+// --- MOTOR MATEMÁTICO ---
 function isYearInRange(rangeStr, targetYearStr) {
     if (!rangeStr || !targetYearStr) return false;
     const target = parseInt(targetYearStr, 10);
@@ -29,10 +29,7 @@ function isYearInRange(rangeStr, targetYearStr) {
     return target === single;
 }
 
-// --- FUNCIÓN "APLANADORA" (NORMALIZACIÓN) ---
-// Elimina espacios, guiones, puntos y convierte a minúsculas.
-// "CX-9" -> "cx9"
-// "F-150" -> "f150"
+// Función auxiliar para aplanar texto (quitar todo lo que no sea letra/número)
 function normalize(str) {
     return str.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
@@ -44,10 +41,8 @@ async function loadData() {
             const response = await fetch(DATA_URL);
             if (!response.ok) throw new Error('Error GitHub Raw.');
             transmissionData = await response.json();
-            
             const modelSet = new Set(transmissionData.map(item => `${item.Make} ${item.Model}`));
             uniqueModelsStr = Array.from(modelSet).join(", ");
-
             dataLoaded = true;
             lastLoadTime = now;
             console.log(`BD Actualizada: ${transmissionData.length} registros.`);
@@ -105,14 +100,18 @@ export default async function handler(request, response) {
     const yearMatch = expandedQuery.match(yearRegex);
     const userYear = yearMatch ? yearMatch[0] : null;
 
-    // 4. Limpieza para búsqueda
+    // 4. Limpieza de Texto para búsqueda
     let textQuery = expandedQuery;
     if (userYear) textQuery = textQuery.replace(userYear, '').trim();
     
     const stopWords = ['cambios', 'cambio', 'velocidades', 'velocidad', 'vel', 'marchas', 'transmision', 'caja', 'automatico', 'automatica'];
     
-    // Separamos las palabras del usuario
+    // Generamos las partes individuales (para búsqueda laxa)
     let queryParts = textQuery.toLowerCase().split(' ').filter(part => part.length > 0 && !stopWords.includes(part));
+    
+    // Generamos la "Frase Aplanada" (para búsqueda estricta tipo CX-9)
+    // "CX-9" -> "cx9". "F-150" -> "f150".
+    const fullFlatQuery = normalize(textQuery);
 
     let candidates = [];
     let searchMode = ""; 
@@ -124,20 +123,22 @@ export default async function handler(request, response) {
         return type.includes(`${userSpeed} SP`) || type.includes(`${userSpeed}SP`) || type.includes(`${userSpeed} SPEED`);
     };
 
-    // --- FILTRADO APLANADOR (LA SOLUCIÓN) ---
+    // --- FILTRADO INTELIGENTE DUAL ---
     const filterLogic = (item) => {
         const rawItemText = `${item.Make} ${item.Model} ${item['Trans Type']} ${item['Engine Type / Size']}`;
-        
-        // 1. Creamos la versión "aplanada" de la BD (sin espacios ni guiones)
-        const flatItemText = normalize(rawItemText);
+        const flatItemText = normalize(rawItemText); // "mazdacx9..."
 
-        // 2. Verificamos cada palabra del usuario
+        // CHEQUEO 1: Búsqueda de Frase Completa (Súper Preciso)
+        // Si el usuario buscó "CX-9" (cx9), y eso existe en la BD (mazdacx9), es MATCH directo.
+        if (fullFlatQuery.length > 2 && flatItemText.includes(fullFlatQuery)) {
+            return true;
+        }
+
+        // CHEQUEO 2: Búsqueda por Palabras (Respaldo para "Jetta Turbo")
+        // Solo entramos aquí si el chequeo 1 falló.
         return queryParts.every(part => {
-            // Aplanamos también la palabra del usuario (ej: "CX-9" -> "cx9")
-            const flatPart = normalize(part);
-            
-            // Verificamos si la palabra aplanada existe en el texto aplanado de la BD
-            return flatItemText.includes(flatPart);
+            // Buscamos la palabra aplanada dentro del texto aplanado
+            return flatItemText.includes(normalize(part));
         });
     };
 
@@ -188,15 +189,13 @@ export default async function handler(request, response) {
                 let cleanSugg = parsed.suggestion;
                 
                 if (userYear) {
-                     // Check de existencia usando la misma lógica aplanadora
                      const existsMath = transmissionData.some(item => {
-                        const rawItemText = `${item.Make} ${item.Model}`;
-                        const flatItemText = normalize(rawItemText);
+                        // Verificación de existencia usando la misma lógica
+                        const rawStr = `${item.Make} ${item.Model}`;
+                        const flatStr = normalize(rawStr);
+                        const suggFlat = normalize(parsed.suggestion);
                         
-                        const suggParts = parsed.suggestion.split(' ');
-                        const matchesName = suggParts.every(part => flatItemText.includes(normalize(part)));
-                        
-                        return matchesName && isYearInRange(item.Years, userYear);
+                        return flatStr.includes(suggFlat) && isYearInRange(item.Years, userYear);
                     });
                     
                     if (existsMath) cleanSugg += ` ${userYear}`;
