@@ -11,6 +11,7 @@ function isYearInRange(rangeStr, targetYearStr) {
     const target = parseInt(targetYearStr, 10);
     let cleanRange = rangeStr.replace(/\s/g, '').toUpperCase();
     
+    // Caso: "98-02"
     if (cleanRange.includes('-') && !cleanRange.includes('UP')) {
         const parts = cleanRange.split('-');
         let start = parseInt(parts[0], 10);
@@ -19,11 +20,13 @@ function isYearInRange(rangeStr, targetYearStr) {
         if (end < 100) end += (end > 50 ? 1900 : 2000);
         return target >= start && target <= end;
     }
+    // Caso: "99-UP"
     if (cleanRange.includes('UP') || cleanRange.includes('+')) {
         let start = parseInt(cleanRange.replace('UP','').replace('+','').replace('-',''), 10);
         if (start < 100) start += (start > 50 ? 1900 : 2000);
         return target >= start;
     }
+    // Caso: Año único
     let single = parseInt(cleanRange, 10);
     if (single < 100) single += (single > 50 ? 1900 : 2000);
     return target === single;
@@ -36,10 +39,8 @@ async function loadData() {
             const response = await fetch(DATA_URL);
             if (!response.ok) throw new Error('Error GitHub Raw.');
             transmissionData = await response.json();
-            
             const modelSet = new Set(transmissionData.map(item => `${item.Make} ${item.Model}`));
             uniqueModelsStr = Array.from(modelSet).join(", ");
-
             dataLoaded = true;
             lastLoadTime = now;
             console.log(`BD Actualizada: ${transmissionData.length} registros.`);
@@ -97,11 +98,14 @@ export default async function handler(request, response) {
     const yearMatch = expandedQuery.match(yearRegex);
     const userYear = yearMatch ? yearMatch[0] : null;
 
-    // 4. LIMPIEZA SIMPLE (Volvimos a lo básico)
+    // 4. LIMPIEZA INTELIGENTE (EL CAMBIO ESTÁ AQUÍ)
     let textQuery = expandedQuery;
     if (userYear) textQuery = textQuery.replace(userYear, '').trim();
     
-    // Solo quitamos palabras "basura", no tocamos guiones ni símbolos del usuario.
+    // CAMBIO: Reemplazamos CUALQUIER símbolo (guion, punto, etc.) por un ESPACIO.
+    // "CX-9" -> "CX 9". "F-150" -> "F 150".
+    textQuery = textQuery.replace(/[^a-zA-Z0-9]/g, ' ');
+
     const stopWords = ['cambios', 'cambio', 'velocidades', 'velocidad', 'vel', 'marchas', 'transmision', 'caja', 'automatico', 'automatica'];
     let queryParts = textQuery.toLowerCase().split(' ').filter(part => part.length > 0 && !stopWords.includes(part));
 
@@ -116,9 +120,9 @@ export default async function handler(request, response) {
     };
 
     // --- FILTRADO ESTÁNDAR ---
-    // Simplemente verificamos si las palabras del usuario están en el texto de la base de datos.
     const filterLogic = (item) => {
         const itemText = `${item.Make} ${item.Model} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
+        // Verificamos si TODAS las partes (ej: "cx", "9") están en el texto de la BD
         return queryParts.every(word => itemText.includes(word));
     };
 
@@ -138,7 +142,7 @@ export default async function handler(request, response) {
         if (candidates.length > 0) searchMode = "ALL_YEARS";
     }
 
-    // NIVEL C: Corrector (Si no encontró nada exacto, aquí entra la IA)
+    // NIVEL C: Corrector
     if (candidates.length === 0) searchMode = "SPELL_CHECK";
 
     const API_KEY = process.env.GEMINI_API_KEY;
@@ -165,15 +169,15 @@ export default async function handler(request, response) {
             const parsed = JSON.parse(rawText);
 
             if (parsed.found && parsed.suggestion) {
-                let replyText = `No encontré coincidencias exactas. ¿Quisiste decir <b>${parsed.suggestion}</b>?`;
+                let replyText = `No encontré coincidencias. ¿Quisiste decir <b>${parsed.suggestion}</b>?`;
                 let cleanSugg = parsed.suggestion;
                 
                 if (userYear) {
-                     // Verificamos existencia real
+                     // Check de existencia con año
                      const existsMath = transmissionData.some(item => {
                         const str = `${item.Make} ${item.Model}`.toLowerCase();
-                        // Verificación simple: ¿El nombre sugerido está en la BD?
-                        const suggParts = parsed.suggestion.toLowerCase().split(' ');
+                        // Replicamos la lógica de limpieza para el chequeo
+                        const suggParts = parsed.suggestion.replace(/[^a-zA-Z0-9]/g, ' ').toLowerCase().split(' ').filter(p => p.length > 0);
                         const matchesName = suggParts.every(w => str.includes(w));
                         return matchesName && isYearInRange(item.Years, userYear);
                     });
