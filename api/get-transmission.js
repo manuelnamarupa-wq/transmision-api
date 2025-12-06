@@ -1,4 +1,3 @@
-
 const DATA_URL = 'https://raw.githubusercontent.com/manuelnamarupa-wq/transmision-api/main/api/transmissions.json';
 
 let transmissionData = [];
@@ -103,12 +102,13 @@ export default async function handler(request, response) {
     const yearMatch = expandedQuery.match(yearRegex);
     const userYear = yearMatch ? yearMatch[0] : null;
 
-    // 4. Limpieza Final de Texto
+    // 4. LIMPIEZA FINAL DE TEXTO (AQUÍ ESTÁ EL CAMBIO CLAVE)
     let textQuery = expandedQuery;
     if (userYear) textQuery = textQuery.replace(userYear, '').trim();
     
-    // Convertimos guiones del usuario en espacios para facilitar la búsqueda (CX-9 -> CX 9)
-    textQuery = textQuery.replace(/-/g, ' ');
+    // ELIMINAMOS GUIONES (COMPRIMIR) EN LUGAR DE REEMPLAZAR POR ESPACIOS
+    // CX-9 -> CX9
+    textQuery = textQuery.replace(/-/g, '');
 
     const stopWords = ['cambios', 'cambio', 'velocidades', 'velocidad', 'vel', 'marchas', 'transmision', 'caja', 'automatico', 'automatica'];
     let queryParts = textQuery.toLowerCase().split(' ').filter(part => part.length > 0 && !stopWords.includes(part));
@@ -123,25 +123,23 @@ export default async function handler(request, response) {
         return type.includes(`${userSpeed} SP`) || type.includes(`${userSpeed}SP`) || type.includes(`${userSpeed} SPEED`);
     };
 
-    // --- FUNCIÓN DE FILTRADO MAESTRA (SOPORTA GUIONES Y SIN GUIONES) ---
+    // --- FUNCIÓN DE FILTRADO MAESTRA (SUPER NORMALIZADA) ---
     const filterLogic = (item) => {
-        // Texto original de la base de datos (Ej: "Mazda CX-9")
+        // Texto original (Ej: "Mazda CX-9")
         const itemText = `${item.Make} ${item.Model} ${item['Trans Type']} ${item['Engine Type / Size']}`.toLowerCase();
         
-        // Texto "espejo" sin guiones (Ej: "Mazda CX9")
-        // Esto permite que si el usuario busca "CX9", lo encuentre aquí.
-        const cleanItemText = itemText.replace(/-/g, '');
+        // Texto "comprimido" (Ej: "mazdacx9") -> Sin espacios, sin guiones
+        const cleanItemText = itemText.replace(/[\s-]/g, '');
 
-        // Verificamos si las palabras del usuario están en el texto original O en el texto sin guiones
-        const matchesName = queryParts.every(word => itemText.includes(word) || cleanItemText.includes(word));
-        
-        return matchesName && matchesSpeed(item);
+        // Verificamos si las palabras del usuario están en el texto original O en el texto comprimido
+        // Si el usuario buscó "CX9" (queryPart), lo encontrará en "mazdacx9" (cleanItemText).
+        return queryParts.every(word => itemText.includes(word) || cleanItemText.includes(word));
     };
 
     // NIVEL A: Exacto
     if (userYear) {
         candidates = transmissionData.filter(item => {
-            return filterLogic(item) && isYearInRange(item.Years, userYear);
+            return filterLogic(item) && isYearInRange(item.Years, userYear) && matchesSpeed(item);
         });
         if (candidates.length > 0) searchMode = "EXACT_YEAR";
     }
@@ -149,7 +147,7 @@ export default async function handler(request, response) {
     // NIVEL B: General
     if (candidates.length === 0) {
         candidates = transmissionData.filter(item => {
-            return filterLogic(item);
+            return filterLogic(item) && matchesSpeed(item);
         });
         if (candidates.length > 0) searchMode = "ALL_YEARS";
     }
@@ -184,7 +182,21 @@ export default async function handler(request, response) {
                 let replyText = `No encontré coincidencias. ¿Quisiste decir <b>${parsed.suggestion}</b>?`;
                 let cleanSugg = parsed.suggestion;
                 
-                if (userYear) cleanSugg += ` ${userYear}`;
+                if (userYear) {
+                     // Checamos existencia usando la misma lógica robusta filterLogic
+                     const existsMath = transmissionData.some(item => {
+                        const str = `${item.Make} ${item.Model}`.toLowerCase();
+                        const cleanStr = str.replace(/[\s-]/g, '');
+                        const suggParts = parsed.suggestion.toLowerCase().split(' ');
+                        
+                        const matchesName = suggParts.every(w => str.includes(w) || cleanStr.includes(w));
+                        return matchesName && isYearInRange(item.Years, userYear);
+                    });
+                    
+                    if (existsMath) cleanSugg += ` ${userYear}`;
+                    else replyText = `El modelo existe, pero no encontré año ${userYear}. ¿Quisiste decir <b>${parsed.suggestion}</b> (Ver todos los años)?`;
+                }
+                
                 if (userSpeed) cleanSugg += ` ${userSpeed} cambios`;
 
                 return response.status(200).json({ reply: replyText, suggestion: cleanSugg });
@@ -229,9 +241,11 @@ export default async function handler(request, response) {
             ${contextForAI}
             ---
             ${baseRules}
-            REGLAS VISUALES:
+            REGLAS VISUALES (CRÍTICO):
             1. ¡SOLO pon en negritas <b> el CÓDIGO!
-            2. Nota de Año: Si el usuario pidió año ${userYear || "N/A"} y no está, pon nota al inicio.
+            2. PROHIBIDO poner en negritas el nombre del auto.
+            
+            Nota: Si pidieron año ${userYear || "N/A"} y no está, inicia con: "No encontré año ${userYear}, mostrando cercanos:".
         `;
     }
 
