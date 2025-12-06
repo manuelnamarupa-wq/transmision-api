@@ -5,13 +5,12 @@ let uniqueModelsStr = "";
 let dataLoaded = false;
 let lastLoadTime = 0;
 
-// --- MOTOR MATEMÁTICO DE AÑOS ---
+// --- MOTOR MATEMÁTICO ---
 function isYearInRange(rangeStr, targetYearStr) {
     if (!rangeStr || !targetYearStr) return false;
     const target = parseInt(targetYearStr, 10);
     let cleanRange = rangeStr.replace(/\s/g, '').toUpperCase();
     
-    // Caso: "98-02"
     if (cleanRange.includes('-') && !cleanRange.includes('UP')) {
         const parts = cleanRange.split('-');
         let start = parseInt(parts[0], 10);
@@ -20,21 +19,19 @@ function isYearInRange(rangeStr, targetYearStr) {
         if (end < 100) end += (end > 50 ? 1900 : 2000);
         return target >= start && target <= end;
     }
-    // Caso: "99-UP"
     if (cleanRange.includes('UP') || cleanRange.includes('+')) {
         let start = parseInt(cleanRange.replace('UP','').replace('+','').replace('-',''), 10);
         if (start < 100) start += (start > 50 ? 1900 : 2000);
         return target >= start;
     }
-    // Caso: Año único
     let single = parseInt(cleanRange, 10);
     if (single < 100) single += (single > 50 ? 1900 : 2000);
     return target === single;
 }
 
-// Función simple para normalizar texto (guiones a espacios)
+// Normalización simple: Guiones a espacios
 function normalizeText(str) {
-    return str.toLowerCase().replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+    return str.toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 async function loadData() {
@@ -44,10 +41,8 @@ async function loadData() {
             const response = await fetch(DATA_URL);
             if (!response.ok) throw new Error('Error GitHub Raw.');
             transmissionData = await response.json();
-            
             const modelSet = new Set(transmissionData.map(item => `${item.Make} ${item.Model}`));
             uniqueModelsStr = Array.from(modelSet).join(", ");
-
             dataLoaded = true;
             lastLoadTime = now;
             console.log(`BD Actualizada: ${transmissionData.length} registros.`);
@@ -74,23 +69,21 @@ export default async function handler(request, response) {
     const userQuery = request.body.query;
     if (!userQuery) return response.status(400).json({ reply: "Ingresa un vehículo." });
     
-    // 1. Detección de Velocidad
+    // --- 1. Detección de Velocidad (SÓLO EXPLÍCITA) ---
+    // Eliminamos la detección de números sueltos para no romper "CX-9", "Mazda 3", "BMW X5".
+    // Ahora solo funciona si escriben "cambios", "vel", "sp", etc.
+    
     let userSpeed = null;
     let queryWithoutSpeed = userQuery;
+
     const explicitSpeedRegex = /\b(\d{1,2})\s*(cambios|cambio|velocidades|velocidad|vel|marchas|sp|speed)\b/i;
     const explicitMatch = userQuery.match(explicitSpeedRegex);
 
     if (explicitMatch) {
         userSpeed = explicitMatch[1]; 
         queryWithoutSpeed = userQuery.replace(explicitMatch[0], ' ').trim();
-    } else {
-        const singleDigitRegex = /\b([3-9])\b/;
-        const singleMatch = userQuery.match(singleDigitRegex);
-        if (singleMatch) {
-            userSpeed = singleMatch[1];
-            queryWithoutSpeed = userQuery.replace(singleMatch[0], ' ').trim();
-        }
-    }
+    } 
+    // NOTA: Se eliminó el bloque 'else' que buscaba dígitos sueltos.
 
     // 2. Expansión de Años
     const expandedQuery = queryWithoutSpeed.replace(/\b(\d{2})\b/g, (match) => {
@@ -105,11 +98,11 @@ export default async function handler(request, response) {
     const yearMatch = expandedQuery.match(yearRegex);
     const userYear = yearMatch ? yearMatch[0] : null;
 
-    // 4. Limpieza Simple
+    // 4. Limpieza y Normalización
     let textQuery = expandedQuery;
     if (userYear) textQuery = textQuery.replace(userYear, '').trim();
     
-    // Normalizamos la búsqueda (guiones -> espacios)
+    // Convertimos símbolos a espacios (CX-9 -> CX 9)
     const normalizedQuery = normalizeText(textQuery);
     
     const stopWords = ['cambios', 'cambio', 'velocidades', 'velocidad', 'vel', 'marchas', 'transmision', 'caja', 'automatico', 'automatica'];
@@ -125,12 +118,12 @@ export default async function handler(request, response) {
         return type.includes(`${userSpeed} SP`) || type.includes(`${userSpeed}SP`) || type.includes(`${userSpeed} SPEED`);
     };
 
-    // --- FILTRADO BÁSICO (SIMPLE Y ROBUSTO) ---
+    // --- FILTRADO ROBUSTO ---
     const filterLogic = (item) => {
-        // Normalizamos también el texto de la base de datos (guiones -> espacios)
+        // Normalizamos la BD igual que el input (Mazda CX-9 -> mazda cx 9)
         const itemText = normalizeText(`${item.Make} ${item.Model} ${item['Trans Type']} ${item['Engine Type / Size']}`);
         
-        // Verificamos si TODAS las palabras del usuario están presentes
+        // Verificamos que todas las partes (cx, 9) estén en el texto
         return queryParts.every(word => itemText.includes(word));
     };
 
@@ -150,19 +143,19 @@ export default async function handler(request, response) {
         if (candidates.length > 0) searchMode = "ALL_YEARS";
     }
 
-    // NIVEL C: Corrector (Aquí entra la IA si escribiste CX9 en vez de CX-9)
+    // NIVEL C: Corrector
     if (candidates.length === 0) searchMode = "SPELL_CHECK";
 
     const API_KEY = process.env.GEMINI_API_KEY;
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${API_KEY}`;
 
-    // --- 1. LÓGICA DEL CORRECTOR ---
+    // --- 1. CORRECTOR ---
     if (searchMode === "SPELL_CHECK") {
         const correctionPrompt = `
             ACTÚA COMO: API JSON de corrección.
             LISTA VÁLIDA: [${uniqueModelsStr}]
             BÚSQUEDA USUARIO: "${textQuery}"
-            TAREA: Encuentra el nombre más parecido (ignora años).
+            TAREA: Encuentra el nombre más parecido.
             FORMATO JSON: { "found": true, "suggestion": "Jeep Liberty" }
         `;
         try {
@@ -177,11 +170,10 @@ export default async function handler(request, response) {
             const parsed = JSON.parse(rawText);
 
             if (parsed.found && parsed.suggestion) {
-                let replyText = `No encontré coincidencias exactas. ¿Quisiste decir <b>${parsed.suggestion}</b>?`;
+                let replyText = `No encontré coincidencias. ¿Quisiste decir <b>${parsed.suggestion}</b>?`;
                 let cleanSugg = parsed.suggestion;
                 
                 if (userYear) {
-                     // Check de existencia simple
                      const existsMath = transmissionData.some(item => {
                         const str = normalizeText(`${item.Make} ${item.Model}`);
                         const suggParts = normalizeText(parsed.suggestion).split(' ');
